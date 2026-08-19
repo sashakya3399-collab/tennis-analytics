@@ -51,6 +51,12 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    // .netlify/functions/* must bypass this middleware entirely — the
+    // Background Function is called server-to-server (from a Server Action
+    // or the Scheduled Function) with a Bearer secret, not a browser
+    // session, so without this exclusion the middleware 307-redirects it
+    // to /login, the redirect gets re-requested with the original POST
+    // method, and /login (a GET-only page) returns 405.
+    "/((?!_next/static|_next/image|favicon.ico|\\.netlify/functions|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
