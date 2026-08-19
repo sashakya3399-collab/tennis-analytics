@@ -11,23 +11,29 @@ troubleshooting session — see `git log` for the exact commit-by-commit fix his
 2. **Netlify** — a team + a site connected to the GitHub repo via continuous deployment.
 3. **Supabase** — a project. Run `supabase/schema.sql` once in the SQL Editor. Create at least
    one Auth user manually (Authentication → Users → Add user) — there's no self-serve signup.
-4. **Groq** (console.groq.com) — free API key, no card.
-5. **Tavily** (tavily.com) — free API key, no card, 1000 credits/month.
-6. **OpenWeatherMap** — free API key (activation can take up to ~2 hours after signup).
+4. **Gemini API** (aistudio.google.com) — API key on a project with the Prepay minimum ($10)
+   spent, so paid-tier billing is active (free tier hit zero-quota/deprecated-model dead ends on
+   2026-08-19). See `GEMINI_PRICING_NOTES.md`.
+5. **OpenWeatherMap** — free API key (activation can take up to ~2 hours after signup).
 
 ## Environment variables (Netlify → Project configuration → Environment variables)
 
 ```
-GROQ_API_KEY=
-GROQ_MODEL=groq/compound
-GROQ_TEXT_MODEL=openai/gpt-oss-120b
-TAVILY_API_KEY=
+GEMINI_API_KEY=
+GEMINI_MODEL_FLASH=gemini-3.6-flash        # optional, this is the code default
+GEMINI_MODEL_PRO=gemini-3.1-pro-preview    # optional, this is the code default
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 OPENWEATHER_API_KEY=
 CRON_SECRET=            # any long random string, e.g. `openssl rand -hex 32`
 ```
+
+**Note on which Netlify account**: this project deploys under a founder-dedicated account
+(`sashakya3399@gmail.com`), which may not be the account any given machine's `netlify` CLI is
+logged into — run `netlify status` and check the team/user name before trying to use the CLI to
+set these; if it doesn't match, add them via the Netlify web dashboard instead (Site configuration
+→ Environment variables), not the CLI.
 
 `URL` (the site's own address) is injected by Netlify automatically at runtime — don't set it
 manually. Changing any of the above requires a redeploy to take effect (Trigger deploy, or push
@@ -53,25 +59,25 @@ a commit).
    method, the redirected request hits `/login` as a POST → `405 Method Not Allowed`. Already
    fixed in this repo's `middleware.ts`; don't remove the exclusion if you ever touch it.
 4. **Credit-based free plan** (2026 pricing) — 300 credits/month, deploys and function
-   invocations both draw from the same pool. Iterate cheaply: reproduce the exact
-   Tavily→Groq→Supabase call chain locally with `curl`/`python3` (real keys are in
-   `.env.local`) BEFORE pushing a fix, instead of deploy-and-see. Only push once a local
-   reproduction confirms the fix.
+   invocations both draw from the same pool. Iterate cheaply: reproduce the exact Gemini call
+   chain locally with a plain Node `fetch` script or `curl` (real key is in `.env.local`) BEFORE
+   pushing a fix, instead of deploy-and-see. Only push once a local reproduction confirms the fix.
 
-## Groq gotchas
+## Gemini gotchas
 
-- Free tier caps `groq/compound` at **30,000 tokens/minute** (org-wide) on its internal routing
-  model. This app's own system prompt alone is ~13,000 tokens — a single match analysis call
-  requests ~14-18K tokens, leaving little headroom for back-to-back calls. The daily loop
-  spaces match analyses 40 seconds apart for this reason (see `ARCHITECTURE.md`).
-- `groq/compound`'s **built-in web search tool is currently broken** (`413 Request Entity Too
-  Large` on most search-triggering prompts — a known, reported Groq platform issue, not
-  something fixable on this end). This app does its own search via Tavily instead and tells the
-  model not to search itself; the API client auto-retries the rare cases where Compound tries
-  anyway.
+- **`googleSearch`/`codeExecution` tool use is prompt-shape-sensitive** — an "ONLY json, no
+  prose" output instruction silently suppresses real search grounding; lead prompts with a short
+  "Search the web right now for: X" imperative and ask for a trailing fenced json block instead.
+  Full details: `~/.claude/skills/gemini-builtin-tool-invocation-prompt-shape/SKILL.md`.
+- **Even with a good prompt, grounding is non-deterministic per call** (~60-70% in live testing,
+  not 100%) — this app treats "didn't confirm grounding" as an escalation trigger to the Pro
+  model rather than assuming a prompt fix alone is sufficient. See `ARCHITECTURE.md`.
 - Check exact model availability for a given API key with `ListModels`
-  (`GET https://api.groq.com/openai/v1/models`) — don't assume a model name from documentation
-  is actually enabled/quota'd for a specific key.
+  (`GET https://generativelanguage.googleapis.com/v1beta/models?key=...`), then confirm with a
+  real minimal `generateContent` call — don't assume a model name from documentation is actually
+  enabled/quota'd for a specific key and billing tier.
+- Prepay credit does not auto-reload — check `aistudio.google.com` → Billing before assuming the
+  paid tier is still active.
 
 ## Local verification workflow (do this before every push, not after)
 
@@ -79,16 +85,11 @@ a commit).
 cd ~/Alish/tennis-analytics
 pnpm exec tsc --noEmit && pnpm run build && pnpm run lint
 
-# reproduce a real API call chain directly, e.g. Tavily search:
+# reproduce a real Gemini call directly:
 source .env.local
-curl -s -X POST "https://api.tavily.com/search" \
-  -H "content-type: application/json" -H "authorization: Bearer $TAVILY_API_KEY" \
-  -d '{"query":"...", "search_depth":"basic", "max_results":3}'
-
-# or a real Groq call:
-curl -s -X POST "https://api.groq.com/openai/v1/chat/completions" \
-  -H "Authorization: Bearer $GROQ_API_KEY" -H "content-type: application/json" \
-  -d '{"model":"groq/compound","messages":[{"role":"user","content":"..."}]}'
+curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_FLASH}:generateContent?key=${GEMINI_API_KEY}" \
+  -H "content-type: application/json" \
+  -d '{"contents":[{"parts":[{"text":"..."}]}],"tools":[{"googleSearch":{}},{"codeExecution":{}}]}'
 ```
 
 ## Manual end-to-end test (once deployed)

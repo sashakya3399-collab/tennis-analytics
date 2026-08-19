@@ -1,6 +1,12 @@
 import { z } from "zod";
-import { generateMatchAnalysis, extractTrailingJsonBlock } from "../groq/client";
-import { searchWeb, formatSearchResults } from "../search/tavily";
+import {
+  generateWithFlash,
+  generateWithPro,
+  getFlashModel,
+  getProModel,
+  getMatrixEngineSystemPrompt,
+  extractTrailingJsonBlock,
+} from "../gemini/client";
 import type { WeatherSnapshot } from "../weather/openweather";
 import type { ScheduledMatch } from "./schedule";
 
@@ -43,6 +49,8 @@ export type MatchAnalysisResult = {
   summary: AnalysisSummary | null;
   usedCodeExecution: boolean;
   usedSearchGrounding: boolean;
+  modelUsed: string;
+  escalatedToPro: boolean;
 };
 
 const TRAILING_JSON_SHAPE = `{
@@ -122,7 +130,75 @@ export function summaryToColumns(summary: AnalysisSummary | null) {
 }
 
 /**
- * Runs the full Matrix Engine (loaded as systemInstruction, including the
+ * Escalation gate for the Flash → Pro hybrid (founder-approved 2026-08-19):
+ * Flash runs first on every match (cheap, GA, ~$0.024/call); a match only
+ * gets a second, more expensive Pro-tier pass (~$0.07/call, frontier
+ * reasoning) when Flash's OWN self-reported numbers say it's a genuinely
+ * uncertain/contentious call, its output didn't even parse, or it didn't
+ * confirm it actually searched (see below). This is a real threshold, not
+ * a forced quota — the fraction of matches that actually escalate depends
+ * on real match uncertainty and search behavior, not a hardcoded 20%.
+ *
+ * Confirmed live 2026-08-19: Gemini's built-in googleSearch tool is
+ * genuinely non-deterministic per call, even with the same well-structured
+ * prompt — some calls attach real groundingMetadata with actual search
+ * queries, others answer confidently from training-data recall with no
+ * grounding metadata at all (and no visible quality difference in the
+ * output — both can look equally well-reasoned). Since this migration's
+ * whole point was more reliable freshness than the old static-Tavily-
+ * prefetch design, a Flash pass that didn't confirm it searched gets a
+ * second, independent shot at grounding via Pro rather than being trusted
+ * on recall alone.
+ */
+const LOW_CONFIDENCE_THRESHOLD = 6; // confidence <= this (out of 10) escalates
+const HIGH_VOLATILITY_THRESHOLD = 7; // volatility >= this (out of 10) escalates
+
+function shouldEscalateToPro(summary: AnalysisSummary | null, usedSearchGrounding: boolean): boolean {
+  if (!summary) return true; // Flash's output didn't even parse — worth a stronger retry
+  if (!usedSearchGrounding) return true; // Flash answered without confirming it actually searched
+  if (summary.model_conflict === true) return true;
+  if ((summary.confidence ?? 10) <= LOW_CONFIDENCE_THRESHOLD) return true;
+  if ((summary.volatility ?? 0) >= HIGH_VOLATILITY_THRESHOLD) return true;
+  return false;
+}
+
+/**
+ * Runs one prompt on Flash first; escalates to Pro only if Flash's own
+ * confidence/volatility/model_conflict fields say the call is uncertain, or
+ * it didn't confirm real search grounding (see shouldEscalateToPro). Shared
+ * by analyzeMatch and analyzeLiveUpdate so both PRE-MATCH and LIVE calls
+ * get the same hybrid treatment.
+ */
+async function runHybrid(systemPrompt: string, userPrompt: string): Promise<MatchAnalysisResult> {
+  const flashResult = await generateWithFlash(systemPrompt, userPrompt);
+  const flashSummary = parseSummary(flashResult.fullText);
+
+  if (!shouldEscalateToPro(flashSummary, flashResult.usedSearchGrounding)) {
+    return {
+      fullReport: flashResult.fullText,
+      summary: flashSummary,
+      usedCodeExecution: flashResult.usedCodeExecution,
+      usedSearchGrounding: flashResult.usedSearchGrounding,
+      modelUsed: getFlashModel(),
+      escalatedToPro: false,
+    };
+  }
+
+  const proResult = await generateWithPro(systemPrompt, userPrompt);
+  return {
+    fullReport: proResult.fullText,
+    summary: parseSummary(proResult.fullText),
+    usedCodeExecution: proResult.usedCodeExecution,
+    usedSearchGrounding: proResult.usedSearchGrounding,
+    modelUsed: getProModel(),
+    escalatedToPro: true,
+  };
+}
+
+const MATCH_ANALYSIS_SYSTEM_PROMPT = getMatrixEngineSystemPrompt();
+
+/**
+ * Runs the full Matrix Engine (loaded as the system prompt, including the
  * founder addendum — sections 075-080) against one specific match. The
  * prompt asks the model to follow the spec exactly — including the
  * mandated PRE FINAL DASHBOARD + МАТЕМАТИЧЕСКИЙ ИТОГ blocks in Russian —
@@ -133,42 +209,22 @@ export function summaryToColumns(summary: AnalysisSummary | null) {
  * motivation/stakes asymmetry) — then append one trailing ```json block
  * with the fields we persist as queryable columns.
  *
- * Does its own real Tavily web search BEFORE calling the model, rather than
- * relying on groq/compound's built-in search tool — that currently 413s on
- * essentially any search-triggering prompt (see search/tavily.ts
- * docstring). The model is explicitly told not to attempt to search
- * itself; only code execution (confirmed working) is used as a tool here.
+ * Uses Gemini's own googleSearch + codeExecution tools in one agentic call
+ * (no separate search-provider pre-fetch step — see schedule.ts docstring
+ * for why the earlier Tavily-based design existed and was removed).
  */
 export async function analyzeMatch(
   match: Pick<ScheduledMatch, "tournament" | "round" | "surface" | "location" | "player_a" | "player_b" | "scheduled_time">,
   weather: WeatherSnapshot | null,
 ): Promise<MatchAnalysisResult> {
-  const [formSearch, statsSearch] = await Promise.all([
-    searchWeb(
-      `${match.player_a} vs ${match.player_b} tennis head-to-head ranking recent results 2026`,
-      3,
-    ),
-    searchWeb(
-      `${match.player_a} ${match.player_b} ${match.surface ?? ""} court stats first serve percentage ${match.location ?? ""} elevation altitude`,
-      3,
-    ),
-  ]);
-  const searchContext = [
-    formatSearchResults("Ranking, recent form, head-to-head", formSearch),
-    formatSearchResults("Surface/serve stats, host city elevation", statsSearch),
-  ].join("\n\n---\n\n");
-
-  const prompt = `${searchContext}
-
----
-
-Apply the full Matrix Engine specification above to this real, current match, using ONLY the
-real search results above as your source of live facts — do NOT attempt to search the web
-yourself under any circumstances (this call has no working search tool; attempting to invoke one
-will fail the whole request). Where the search results don't cover something, say so explicitly
-per the spec's own "не выдумывать данные" rule rather than inventing a number. Use code execution
-to actually run the Elo, Bayesian shrinkage, hold/break, and Markov-chain set/match probability
-math the spec describes — do not eyeball or mentally approximate the numbers.
+  const prompt = `Apply the full Matrix Engine specification above to this real, current match. Use
+your real Google Search tool to find live facts — rankings, recent form, head-to-head, surface and
+serve/return stats, host city elevation, and how each player has historically performed in
+conditions similar to today's — rather than relying on prior knowledge, which may be outdated.
+Where search genuinely doesn't cover something after a real attempt, say so explicitly per the
+spec's own "не выдумывать данные" rule rather than inventing a number. Use code execution to
+actually run the Elo, Bayesian shrinkage, hold/break, and Markov-chain set/match probability math
+the spec describes — do not eyeball or mentally approximate the numbers.
 
 MATCH:
 Tournament: ${match.tournament ?? "unknown"}
@@ -184,7 +240,7 @@ ADDITIONAL REQUIRED FACTORS (on top of the base spec — these are mandatory for
 
 1. SURFACE + LAST 15 ON THIS SURFACE: the base spec's section 062 asks for a "Last-10-Surface"
    split — override that to LAST 15, not 10 (section 076 priority #4 in the addendum defers to
-   this per-call instruction). Using the search results above, report each player's last 15 completed matches
+   this per-call instruction). Search for and report each player's last 15 completed matches
    specifically on ${match.surface ?? "this surface"} (win/loss record, and briefly how they
    played — dominant/close/struggling), not last 15 overall. If a player has fewer than 15 career
    matches on this surface, use however many real matches exist and say so explicitly rather than
@@ -196,16 +252,16 @@ ADDITIONAL REQUIRED FACTORS (on top of the base spec — these are mandatory for
    the total goes OVER that line and probability it goes UNDER it (they should sum to ~1.0). State
    the line and both probabilities as their own labeled output, not buried only in prose.
 
-3. ALTITUDE / BALL PHYSICS: using the search results above, find the host city's elevation above
-   sea level (if not present in the results, say so explicitly rather than guessing). If the venue is
-   at meaningfully high altitude (roughly >500m — e.g. Madrid ~667m is a known real example on
-   tour), explicitly factor in the physical effect: thinner air reduces drag on the ball, which
-   increases ball speed through the air and bounce height/skid — this generally favors bigger
-   servers and flatter, faster hitters, and tends to push the total-games and ace-count expectation
-   up. State the elevation in meters and whether/how it adjusts your read, even if the effect is
-   negligible at low altitude — say so explicitly rather than omitting the factor.
+3. ALTITUDE / BALL PHYSICS: search for the host city's elevation above sea level (if you genuinely
+   cannot find it, say so explicitly rather than guessing). If the venue is at meaningfully high
+   altitude (roughly >500m — e.g. Madrid ~667m is a known real example on tour), explicitly factor
+   in the physical effect: thinner air reduces drag on the ball, which increases ball speed through
+   the air and bounce height/skid — this generally favors bigger servers and flatter, faster
+   hitters, and tends to push the total-games and ace-count expectation up. State the elevation in
+   meters and whether/how it adjusts your read, even if the effect is negligible at low altitude —
+   say so explicitly rather than omitting the factor.
 
-4. FIRST SERVE % AND RETURN OF SERVE: using the search results above, find each player's real, current first-serve-in
+4. FIRST SERVE % AND RETURN OF SERVE: search for each player's real, current first-serve-in
    percentage, first-serve points won %, second-serve points won %, and return points won %
    (recent tour-level form, not just career average) for their SERVE and RETURN ratings in the
    dashboard below — do not assign those 1-10 ratings without grounding them in these real stats.
@@ -214,12 +270,11 @@ ADDITIONAL REQUIRED FACTORS (on top of the base spec — these are mandatory for
    conditions — hot and dry (faster, harder court, ball flies further), rain/high humidity (slower
    court, ball picks up less pace, and on clay a WET clay court gets noticeably more slippery,
    changing how reliably players can slide into shots), or windy (disrupts timing, favors flatter
-   hitters over players who rely on heavy topspin arcs). Using the search results above, find how
-   each player has performed historically in these SAME conditions before (hot-weather matches,
-   rain-affected/high-humidity matches, matches where sliding into the shot on a wet/slick surface
-   mattered) — name which player has the better track record in this specific condition and why,
-   rather than a generic "weather could be a factor" statement. If the results don't cover this,
-   say so explicitly.
+   hitters over players who rely on heavy topspin arcs). Search for how each player has performed
+   historically in these SAME conditions before (hot-weather matches, rain-affected/high-humidity
+   matches, matches where sliding into the shot on a wet/slick surface mattered) — name which
+   player has the better track record in this specific condition and why, rather than a generic
+   "weather could be a factor" statement. If search doesn't cover this, say so explicitly.
 
 6. LAST 10 UNDER THIS EXACT SURFACE+WEATHER COMBINATION: separately from the broader LAST-15
    surface-only sample in item 1, isolate up to the LAST 10 matches for EACH player that most
@@ -228,13 +283,13 @@ ADDITIONAL REQUIRED FACTORS (on top of the base spec — these are mandatory for
    into). From that narrower, condition-matched sample, compute an explicit comparative number for
    each player (e.g. win rate or games-won rate in that sample) and state directly which player
    mathematically performs better in this specific case — this must be a stated comparison, not
-   just narrative. If real match-by-match weather-tagged history genuinely isn't available (public
+   just narrative. If real match-by-match weather-tagged history genuinely isn't findable (public
    databases usually don't tag conditions), say so explicitly and fall back to the closest available
    proxy (e.g. surface-only last-10, or the item-1 last-15 sample), naming the fallback used.
 
-7. RANKING + MOTIVATION/STAKES ASYMMETRY: using the search results above, explicitly state each
-   player's real, current ATP/WTA singles ranking (and ranking points if findable) — do not leave
-   this implicit; say so if the results don't cover it.
+7. RANKING + MOTIVATION/STAKES ASYMMETRY: search for each player's real, current ATP/WTA singles
+   ranking (and ranking points if findable) — do not leave this implicit; say so if you genuinely
+   cannot find it.
    Then reason about why THIS match matters to each player right now: ranking points being
    defended from last year at this same event, points needed to stay in/reach the top N for
    seeding or direct entry to majors, ATP/WTA Race-to-Finals implications, prize money significance
@@ -251,33 +306,16 @@ replaces the spec's default LAST-10 language for the general surface sample; add
 "РЕЙТИНГ", and "МОТИВАЦИЯ" lines to the dashboard). Immediately after the PRE FINAL DASHBOARD, also
 output the compact "🎾 МАТЕМАТИЧЕСКИЙ ИТОГ" block per addendum section 075.
 
-REMINDER (this is not optional): you do not have a working web-search tool in this call. If
-anything above is missing from the search results, write "нет данных" for that specific point and
-continue — do NOT call a search tool to try to find it, that call will fail and abort your entire
-response. Code execution is the only tool available and expected here.
+Report your own confidence and volatility (0-10, per the spec's own convention) honestly in the
+trailing JSON block — this genuinely controls whether a second, stronger-model pass reviews this
+match, so do not inflate confidence or deflate volatility to make the call look cleaner than it is.
 
 After both blocks, append exactly one fenced block:
 \`\`\`json
 ${TRAILING_JSON_SHAPE}
 \`\`\``;
 
-  const { fullText, usedCodeExecution, usedSearchGrounding: modelAttemptedOwnSearch } =
-    await generateMatchAnalysis(prompt);
-
-  // "Search grounding" now means our own pre-fetched Tavily results actually
-  // returned content (the model has no working search tool of its own —
-  // see the docstring above). modelAttemptedOwnSearch is kept as a
-  // diagnostic: if it's ever true, groq/compound tried to search despite
-  // being told not to, which is worth knowing even though it's not what
-  // "grounded" means here anymore.
-  const ourSearchHadResults = formSearch.results.length > 0 || statsSearch.results.length > 0;
-
-  return {
-    fullReport: fullText,
-    summary: parseSummary(fullText),
-    usedCodeExecution,
-    usedSearchGrounding: ourSearchHadResults || modelAttemptedOwnSearch,
-  };
+  return runHybrid(MATCH_ANALYSIS_SYSTEM_PROMPT, prompt);
 }
 
 export type PriorAnalysisContext = {
@@ -296,7 +334,8 @@ export type PriorAnalysisContext = {
  * whole PRE-MATCH build-up, just recompute LIVE against the prior context.
  * The prior full report is passed back to the model as context (not
  * re-derived) so it can reference rather than redo the surface/serve/
- * return/hold groundwork.
+ * return/hold groundwork. Same Flash-first, escalate-if-uncertain hybrid
+ * as analyzeMatch.
  */
 export async function analyzeLiveUpdate(
   context: PriorAnalysisContext,
@@ -304,11 +343,12 @@ export async function analyzeLiveUpdate(
 ): Promise<MatchAnalysisResult> {
   const prompt = `LIVE UPDATE per addendum section 078 — a PRE-MATCH analysis for this exact pair
 already exists (full text below). Do NOT redo the full PRE-MATCH build-up (surface/serve/return/
-hold groundwork), and do NOT attempt to search the web (this call has no working search tool;
-attempting to invoke one will fail the whole request) — the prior analysis below already has all
-the facts you need. Take the current live score as new evidence and recompute the LIVE win
-probabilities, most likely final score, and total games from this point, using code execution for
-the actual math (score-state game/set probability, not eyeballing).
+hold groundwork) — the prior analysis below already has that. If the current score or situation
+raises something the prior analysis didn't cover (e.g. an injury, a retirement risk, a big recent
+form swing), you may use your real Google Search tool to check for it, but keep it brief. Take the
+current live score as new evidence and recompute the LIVE win probabilities, most likely final
+score, and total games from this point, using code execution for the actual math (score-state
+game/set probability, not eyeballing).
 
 MATCH:
 Tournament: ${context.tournament ?? "unknown"}
@@ -330,17 +370,13 @@ conclusions across sections, no long intro): a short "LIVE" heading, what change
 pre-match read given the current score, then the "🎾 МАТЕМАТИЧЕСКИЙ ИТОГ" block (section 075)
 recomputed for the live state, in Russian.
 
+Report your own confidence and volatility (0-10) honestly in the trailing JSON block — this
+controls whether a second, stronger-model pass reviews this update.
+
 After that, append exactly one fenced block:
 \`\`\`json
 ${TRAILING_JSON_SHAPE}
 \`\`\``;
 
-  const { fullText, usedCodeExecution, usedSearchGrounding } = await generateMatchAnalysis(prompt);
-
-  return {
-    fullReport: fullText,
-    summary: parseSummary(fullText),
-    usedCodeExecution,
-    usedSearchGrounding,
-  };
+  return runHybrid(MATCH_ANALYSIS_SYSTEM_PROMPT, prompt);
 }

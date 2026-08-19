@@ -5,7 +5,7 @@ import { triggerBackgroundAnalysis } from "../../src/lib/analysis/trigger";
  * Netlify Scheduled Function — cron trigger only, capped at 30s by Netlify
  * regardless of plan (verified against current Netlify docs). It must NOT
  * do the actual analysis work itself (that routinely takes minutes across
- * several Groq calls) — it just fires the Background Function
+ * several Gemini calls) — it just fires the Background Function
  * (run-analysis-background.ts, 15-minute budget) and returns as soon as
  * that hand-off is acknowledged.
  *

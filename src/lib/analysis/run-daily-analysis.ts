@@ -15,14 +15,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Groq's free tier caps groq/compound's internal routing model at 30K
-// tokens/minute (org-wide), and one match analysis call alone requests
-// ~14-18K tokens (confirmed live 2026-08-19) — firing them back-to-back in
-// a loop exhausts that budget after 1-2 matches. Spacing calls by 40s keeps
-// sustained throughput safely under the ceiling (~21-27K tokens/min
-// average) without needing a paid tier. The Background Function has a
-// 15-minute budget, so this comfortably fits even a ~15-match day.
-const MATCH_ANALYSIS_SPACING_MS = 40_000;
+// Gemini's paid tier (activated 2026-08-19) has much higher per-minute
+// limits than Groq's free tier did, so this is now just a conservative
+// courtesy spacing rather than a load-bearing rate-limit workaround — the
+// real safety net is callGemini()'s own 429 retry-with-backoff in
+// src/lib/gemini/client.ts. The Background Function has a 15-minute
+// budget, so this comfortably fits even a ~15-match day.
+const MATCH_ANALYSIS_SPACING_MS = 5_000;
 
 /**
  * The full daily job: find today's real schedule, fetch weather per match,
@@ -95,7 +94,7 @@ export async function runDailyAnalysis(
           player_b: match.player_b,
           ...summaryToColumns(analysis.summary),
           full_report: analysis.fullReport,
-          model_used: process.env.GROQ_MODEL || "groq/compound",
+          model_used: analysis.modelUsed,
           used_code_execution: analysis.usedCodeExecution,
           used_search_grounding: analysis.usedSearchGrounding,
         });

@@ -1,6 +1,5 @@
 import { z } from "zod";
-import { generateText } from "../groq/client";
-import { searchWeb, formatSearchResults } from "../search/tavily";
+import { generateWithFlash } from "../gemini/client";
 
 const ScheduledMatchSchema = z.object({
   // Nullable: the extraction model occasionally returns null here even
@@ -92,70 +91,58 @@ export function isTopTierSinglesMatch(match: ScheduledMatch): boolean {
   return hasTopTierHint;
 }
 
+const SCHEDULE_SYSTEM_PROMPT =
+  "You extract structured tennis schedule data using your real, live Google Search tool. " +
+  "Never invent matches you did not actually find via search.";
+
 /**
  * Finds today's real ATP/WTA schedule, restricted to top-tier tour-level
  * singles only — no doubles, no ITF World Tennis Tour (M15/M25/W15/W25...),
  * no Challengers, no seniors/legends/wheelchair/exhibition circuits.
  *
- * Two-step design (not a single LLM-with-built-in-search call): Groq's
- * groq/compound has a built-in web search tool, but it currently 413s on
- * essentially any search-triggering prompt (see search/tavily.ts
- * docstring), so this does a real Tavily search itself, then hands the
- * real results to a plain (non-agentic) Groq model purely to extract
- * structured JSON — a pure text-reasoning task, no tools involved.
+ * Single agentic Gemini call with the googleSearch tool enabled — the model
+ * decides itself how many queries to run and can re-search with different
+ * phrasing if the first pass doesn't clearly answer the question. This
+ * replaces the earlier two-step Tavily-pre-fetch-then-extract design (see
+ * git history around 2026-08-19), which was only needed because Groq's own
+ * search tool was broken.
+ *
+ * PROMPT SHAPE MATTERS (confirmed live 2026-08-19, real A/B test against
+ * the API): asking for "ONLY a raw JSON array, no prose" made the model
+ * skip calling googleSearch entirely and answer from training-data recall
+ * instead — verified via groundingMetadata being completely absent from the
+ * response across repeated identical calls. Leading with a short, direct
+ * "Search the web right now for: X" imperative, and asking for a trailing
+ * fenced json block (not an ONLY-json instruction) instead, reliably
+ * produces real groundingMetadata with actual search queries every time.
+ * extractJsonArray() below already tolerates a fenced block or a bare
+ * array embedded in prose, so this costs nothing on the parsing side.
  */
 export async function fetchTodaysSchedule(dateISO: string): Promise<{
   matches: ScheduledMatch[];
   filteredOutCount: number;
 }> {
-  // Two separate searches, not one: order-of-play pages usually list real
-  // match pairings WITHOUT ever stating the tournament name in their own
-  // text (confirmed live 2026-08-19 — a real WTA order-of-play PDF just
-  // said "> ATP" / "> WTA" per match, no tournament name at all), while a
-  // tour-calendar-style page reliably names which tournament is on for a
-  // given week. Both get handed to the model together so it can
-  // cross-reference rather than default to null when one source alone is
-  // incomplete.
-  //
-  // topic:"news" (not the default "general") and a "today's round / live
-  // scores" phrasing, not "order of play" — confirmed live 2026-08-19 that
-  // a generic "order of play" query surfaced a stale, undated PDF at a
-  // fixed URL (wtafiles.wtatennis.com/.../OP.pdf — the kind of URL a
-  // tournament overwrites daily, so a cached/indexed copy can silently be
-  // from an earlier day) and every match extracted from it turned out to
-  // be from a round that had already passed. A "today's round / live
-  // scores" news-topic query instead reliably surfaces dated per-match
-  // official tour pages.
-  const [matchesSearch, tournamentSearch] = await Promise.all([
-    searchWeb(`ATP WTA tennis today's round live scores results ${dateISO}`, 6, "news"),
-    searchWeb(`what ATP WTA tennis tournament is being played on ${dateISO}`, 3),
-  ]);
-  const searchContext = [
-    formatSearchResults(`Match pairings for ${dateISO}`, matchesSearch),
-    formatSearchResults(`Which tournament is on around ${dateISO}`, tournamentSearch),
-  ].join("\n\n---\n\n");
+  const prompt = `Search the web right now for: "ATP WTA tennis today's round live scores results
+${dateISO}". Favor "today's round / live scores / results" style queries over "order of play /
+schedule" style queries — a tournament's order-of-play page usually lives at a FIXED URL that gets
+overwritten daily, so a cached copy of it can silently be from an earlier day and look exactly as
+current as a genuinely fresh result. If your first search doesn't clearly show which round is
+CURRENTLY being played today, search again with different phrasing (e.g. naming a specific
+tournament plus "results today") before continuing — do not settle for a single ambiguous source.
 
-  const prompt = `${searchContext}
+Using ONLY what you actually found in those real searches (not prior knowledge — if you did not
+genuinely search, say so rather than guessing), identify the top-tier ATP Tour and WTA Tour
+SINGLES matches SCHEDULED for ${dateISO}.
 
-Based ONLY on the real search results above (do not use prior knowledge, do not invent matches —
-if the results don't clearly show a match, leave it out), extract the top-tier ATP Tour and WTA
-Tour SINGLES matches SCHEDULED for ${dateISO}.
+FRESHNESS CHECK (mandatory): only include a match pairing if you can confirm, from what you
+actually found, that it corresponds to TODAY's (${dateISO}) play — not a past round, not a
+past day at the same fixed URL. If you cannot confirm a pairing is genuinely current, leave it
+out rather than guessing.
 
-FRESHNESS CHECK (mandatory, do not skip): before including any match, check the [published: ...]
-date tag next to the source it came from. If a source has no publish date, or its publish date is
-more than 1-2 days before ${dateISO}, treat its match pairings as POSSIBLY STALE — a page can sit
-at the same URL and get overwritten daily by the tournament, so a cached/indexed copy can reflect
-an earlier day's play, not today's. Prefer sources whose publish date is on or within a day of
-${dateISO} and whose content mentions a specific round (e.g. "Round of 32", "Quarterfinal") that
-is internally consistent across multiple sources — if two sources disagree on which round is
-current, trust the more recently published one. If you cannot find a confidently CURRENT source
-for a specific pairing, leave it out rather than including a possibly-stale match.
-
-IMPORTANT: the match-pairings source often does NOT state the tournament name in its own text
-(e.g. an order-of-play page may just say "ATP" / "WTA" per match with no tournament name visible).
-When that happens, CROSS-REFERENCE the second search block above (which tournament is on around
-this date) to identify the tournament — do not leave "tournament" null just because one source
-alone didn't name it, if the other source makes it clear from the date/week.
+The match-pairings source often does NOT state the tournament name in its own text (e.g. an
+order-of-play page may just say "ATP" / "WTA" per match with no tournament name visible). When
+that happens, cross-reference a separate search for which tournament is on this week to identify
+it — do not leave "tournament" null just because one source alone didn't name it.
 
 ONLY include matches from top-tier tour-level events:
 - Grand Slams (Australian Open, Roland Garros/French Open, Wimbledon, US Open)
@@ -164,15 +151,16 @@ ONLY include matches from top-tier tour-level events:
 - ATP 250 / WTA 250
 - ATP Finals / WTA Finals
 
-STRICTLY EXCLUDE, even if mentioned in the results:
+STRICTLY EXCLUDE, even if mentioned in search results:
 - Doubles or mixed doubles (singles only)
 - ITF World Tennis Tour events (tournament codes like M15, M25, W15, W25, W35, M35, W75, M75, etc.)
 - ATP/WTA Challenger Tour
 - Wheelchair, seniors/legends, exhibition, or juniors events
 - Qualifying rounds of any of the above (main draw only)
 
-Respond with ONLY a raw JSON array (no prose, no markdown fences, no commentary before or
-after) where each element has exactly these fields:
+Briefly explain what you found and how you confirmed it's current, then append exactly one fenced
+block with the extracted matches:
+\`\`\`json
 [
   {
     "tournament": "string, e.g. Cincinnati Open",
@@ -185,15 +173,13 @@ after) where each element has exactly these fields:
     "scheduled_time": "ISO 8601 datetime string or null if not published yet"
   }
 ]
+\`\`\`
 
-If the search results genuinely show no qualifying top-tier ATP/WTA singles matches for this date,
-respond with an empty array: []`;
+If your search genuinely shows no qualifying top-tier ATP/WTA singles matches for this date, use
+an empty array: []`;
 
-  const text = await generateText(
-    "You extract structured tennis schedule data from real search results. Never invent matches not present in the provided results.",
-    prompt,
-  );
-  const parsed = extractJsonArray(text);
+  const { fullText } = await generateWithFlash(SCHEDULE_SYSTEM_PROMPT, prompt, ["googleSearch"]);
+  const parsed = extractJsonArray(fullText);
   const all = ScheduleResponseSchema.parse(parsed);
 
   const matches = all.filter(isTopTierSinglesMatch);

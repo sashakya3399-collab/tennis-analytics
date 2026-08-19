@@ -3,6 +3,19 @@
 
 [build.environment]
   NODE_VERSION = "22"
+  # Turbopack's persistent build cache legitimately contains every env var
+  # value read during the build (including real secrets) — that's a normal
+  # artifact of the cache, not a leak into shipped output, so it's excluded
+  # from Netlify's secrets scan. Real secrets are still scanned everywhere
+  # else (the actual shipped bundles).
+  SECRETS_SCAN_OMIT_PATHS = ".netlify/.next/cache/**"
+  # These are not actually sensitive: the two NEXT_PUBLIC_ vars are meant to
+  # be embedded in the browser bundle (that's what NEXT_PUBLIC_ means —
+  # Supabase's anon key is designed to be public, protected by RLS, not a
+  # secret), and the two GEMINI_MODEL_* vars are just model name strings,
+  # not credentials. Listed here as a durable backstop even if one of them
+  # ever gets re-marked "Secret" in the Netlify UI by mistake.
+  SECRETS_SCAN_OMIT_KEYS = "NEXT_PUBLIC_SUPABASE_URL,NEXT_PUBLIC_SUPABASE_ANON_KEY,GEMINI_MODEL_FLASH,GEMINI_MODEL_PRO"
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
