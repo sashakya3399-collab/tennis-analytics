@@ -124,10 +124,22 @@ Under 1.95), 10.5 (Over 2.10/Under 1.70)."`;
  * vision-capable model (qwen/qwen3.6-27b on Groq — free tier, no card).
  * Kept as its own call, separate from the math analysis, since Groq's free
  * vision and free code-execution quotas are independent per-model limits.
+ *
+ * Strips a leading <think>...</think> block — qwen3.6-27b's reasoning
+ * models emit one before the actual answer (confirmed live), and it's
+ * verbose enough on its own to blow past Tavily's 1500-character query
+ * limit if left in (confirmed live: a real "Query is too long" 400 from
+ * embedding the raw extraction output, think-block included, into a
+ * search query). Neither the search queries nor the final analysis prompt
+ * need the model's internal reasoning, only its actual answer.
  */
 async function extractMatchFacts(image: GroqImage): Promise<string> {
-  return extractFromScreenshot(image, EXTRACTION_PROMPT);
+  const raw = await extractFromScreenshot(image, EXTRACTION_PROMPT);
+  return raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
 }
+
+/** Tavily's hard limit is 1500 chars; stay well under it for the base query before appending topic keywords. */
+const MAX_QUERY_FACTS_CHARS = 300;
 
 /**
  * PRE-MATCH analysis, screenshot-only input (addendum section 077). Three
@@ -150,11 +162,15 @@ async function extractMatchFacts(image: GroqImage): Promise<string> {
  */
 export async function analyzeScreenshot(image: GroqImage): Promise<MatchAnalysisResult> {
   const extractedFacts = await extractMatchFacts(image);
+  // Defensive cap on top of the <think>-stripping above — never let a
+  // search query exceed Tavily's 1500-char limit regardless of how
+  // verbose a future extraction-model response turns out to be.
+  const queryFacts = extractedFacts.slice(0, MAX_QUERY_FACTS_CHARS);
 
   const [formSearch, statsSearch, weatherPlayerSearch] = await Promise.all([
-    searchWeb(`${extractedFacts} recent form ranking head-to-head tennis 2026`, 3),
-    searchWeb(`${extractedFacts} first serve percentage return stats court elevation`, 3),
-    searchWeb(`${extractedFacts} weather forecast court conditions player injury fatigue news`, 3, "news"),
+    searchWeb(`${queryFacts} recent form ranking head-to-head tennis 2026`, 3),
+    searchWeb(`${queryFacts} first serve percentage return stats court elevation`, 3),
+    searchWeb(`${queryFacts} weather forecast court conditions player injury fatigue news`, 3, "news"),
   ]);
   const searchContext = [
     formatSearchResults("Screenshot extraction (players/surface/total lines)", { answer: extractedFacts, results: [] }),
