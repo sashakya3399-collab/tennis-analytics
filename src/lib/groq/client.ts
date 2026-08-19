@@ -28,12 +28,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Pulls "Please try again in 14.368s" out of a Groq 429 error body, if present. */
+/**
+ * Pulls the suggested wait out of a Groq 429 error body, if present. Groq
+ * uses two formats depending on the limit hit: "try again in 14.368s"
+ * (TPM, seconds only) and "try again in 1m49.900799999s" (TPD — daily
+ * token cap, minutes+seconds — confirmed live 2026-08-19 on a real
+ * deployed-site request). The original regex only matched the
+ * seconds-only form, silently truncating "1m49.9s" down to "1" (one
+ * second) and causing the retry to fire far too early and fail again.
+ */
 function parseRetryDelayMs(body: string): number | null {
-  const match = body.match(/try again in ([\d.]+)s/i);
+  const match = body.match(/try again in (?:(\d+)m)?([\d.]+)s/i);
   if (!match) return null;
-  const seconds = parseFloat(match[1]);
-  return Number.isFinite(seconds) ? Math.ceil(seconds * 1000) : null;
+  const minutes = match[1] ? parseInt(match[1], 10) : 0;
+  const seconds = parseFloat(match[2]);
+  if (!Number.isFinite(seconds)) return null;
+  return Math.ceil((minutes * 60 + seconds) * 1000);
 }
 
 const MAX_RETRIES = 2;
@@ -84,7 +94,12 @@ async function callGroq(
     if (!canRetry) throw lastError;
 
     const delayMs = res.status === 429 ? (parseRetryDelayMs(body) ?? 20_000) : 5_000;
-    await sleep(Math.min(delayMs, 35_000));
+    // Cap raised from 35s to 150s (2026-08-19): a real TPD (tokens-per-day)
+    // 429 suggested a ~110s wait, which the old 35s cap would have
+    // truncated, guaranteeing the retry fires too early and fails again.
+    // The Background Function has a 15-minute budget, so this is still a
+    // small fraction of it even with MAX_RETRIES=2.
+    await sleep(Math.min(delayMs, 150_000));
   }
 
   throw lastError ?? new Error("Groq API call failed after retries.");
