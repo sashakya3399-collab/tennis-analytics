@@ -1,56 +1,69 @@
-# Gemini pricing notes — LIVE architecture as of 2026-08-19
+# Gemini pricing notes — ARCHIVED (app no longer uses Gemini as of 2026-08-19)
 
-Real, live-fetched pricing from `ai.google.dev/gemini-api/docs/pricing`, captured the same day the
-founder spent a real $10 on AI Studio's Prepay minimum to unlock paid-tier billing on
-`project-6737c023-bc37-41f5-a67`. This app now runs on the hybrid described below, not Groq/Tavily.
+**Status**: this app moved back to Groq + Tavily (free tier, no card) the same day these notes
+were written, after the founder's $10 Gemini Prepay credit ran out faster than expected and no
+further budget was available ("no extra money"). Kept as reference — the findings below are real
+and could matter again if Gemini is ever revisited (e.g. the Vertex AI / $300 trial credit lead).
 
-## Models in use
+## What actually happened (real, live-observed 2026-08-19)
 
-- **`gemini-3.6-flash`** — default, every match runs on this first. GA (not preview).
-  - Input: $0.75 / 1M tokens (through Dec 31, 2026; $1.50 from Jan 2027)
-  - Output: $3.75 / 1M tokens (through Dec 31, 2026; $7.50 from Jan 2027)
-- **`gemini-3.1-pro-preview`** — escalation only, when Flash's own output says a match is
-  uncertain or didn't confirm real search grounding (see `ARCHITECTURE.md`). Preview status —
-  could change without GA's notice period.
-  - Input: $2.00 / 1M tokens (≤200k-token prompts; $4.00 above that)
-  - Output: $12.00 / 1M tokens (≤200k-token prompts; $18.00 above that)
-- **Google Search grounding**: 5,000 free requests/month shared across all Gemini 3.x models,
-  then $14/1,000 requests. This app's realistic volume stays well under the free allowance.
-- **Code execution**: no separate charge — billed at the selected model's standard token rates.
+The $10 Prepay credit (real money, spent deliberately after confirming account-owner authorization)
+was exhausted within one afternoon of development/testing — balance went to **-$1.48** (real total
+spend ≈ $11.48), and a separate "Monthly spending limit (experimental): $10.24" was also hit.
+Google's own "Total cost" dashboard graph significantly LAGGED the real, authoritative balance —
+don't trust that graph for real-time cost tracking on this platform; trust the Credit Balance /
+Transactions numbers instead.
 
-## Per-match cost (measured system-prompt size ~13,100 tokens, typical call shape ~17K in + 3K out)
+## Root cause: search grounding bills retrieved page content as input tokens
 
-- Flash only: ≈ **$0.024/match**
-- Pro (escalated): ≈ **$0.07/match**
+Inspecting real `usageMetadata` on a grounded call revealed the actual cost driver the original
+estimate missed entirely: when Gemini's `googleSearch` tool grounds, the RETRIEVED PAGE CONTENT
+gets injected into context and billed under `toolUsePromptTokenCount` — one observed PRE-MATCH
+call showed **438,500** such tokens (on top of a 16,370-token system+user prompt), costing
+**≈$0.40 for that single call** — roughly 17x the original $0.024/match estimate, which only
+counted the system prompt + typical output size.
 
-## Escalation rate — revised down from the founder's original "~20%" estimate
+## The fix that was chosen: don't use Gemini's own search tool at all
 
-The founder originally reasoned "Flash by default + Pro on ~20% spory (contentious) matches."
-Once implemented, a real finding changed that: Gemini's `googleSearch` tool doesn't reliably fire
-even on a good prompt (~60-70% grounded in live A/B testing, not 100%) — "Flash didn't confirm it
-searched" was folded into the escalation trigger alongside confidence/volatility. **Realistic
-escalation rate is likely closer to 30-50%, not a fixed 20%** — it depends on how often real
-matches are close AND how often Flash happens to skip searching, neither of which is a knob this
-app controls precisely.
+Rather than trying to constrain/reduce Gemini's search-grounding token usage, the app reverted to
+the same real-search-as-a-separate-step pattern from earlier in this project's history: Tavily
+(free, 1000 requests/month, curated short snippets, not full page text) for search, Groq
+(`groq/compound`, free, 250 req/day) for reasoning + real code execution, and a Groq vision model
+(`qwen/qwen3.6-27b`, free, 1000 req/day) for reading the uploaded screenshot. See `ARCHITECTURE.md`
+for the current design.
 
-## Revised monthly cost estimate (blended, ~40% escalation as a working assumption)
+## Unresolved research lead: Vertex AI / "Gemini Enterprise Agent Platform" + the untouched $300 credit
 
-Blended cost/match ≈ 0.6 × $0.024 + 0.4 × ($0.024 + $0.07) ≈ **$0.052/match**
+Real research (2026-08-19), not yet acted on: Vertex AI was rebranded to "Gemini Enterprise Agent
+Platform" at Google Cloud Next 2026 — a DIFFERENT billing product from "Gemini API in AI Studio"
+(the one that was actually used and ran out). Google's own docs explicitly exclude from the $300
+free trial: (a) "Gemini API in AI Studio" specifically, and (b) third-party "partner" models sold
+as "Model as a Service" (Claude, Llama, etc. via Model Garden) — but do NOT explicitly exclude
+Google's own first-party Gemini models called via Vertex AI/Agent Platform's standard
+`generateContent`-shaped API, which follows normal Google Cloud pay-as-you-go billing that the
+$300 trial credit should cover. Multiple sources (including Google's own product pages) describe
+the $300 credit as applying to this platform. **Not empirically confirmed** — would need a real
+test call + checking Google Cloud Console billing to see whether it draws from the $300 trial
+balance. Also requires different auth (OAuth2/service-account, not a simple API key) and a
+different endpoint URL — real engineering work, not a config change. If ever revisited: verify
+with ONE minimal real call before any re-architecture.
 
-- Quiet week (2-3 matches/day): ≈ **$4-5/month**
-- Typical load (~10 matches/day): ≈ **$15-16/month**
-- Heavy Grand Slam days: a few dollars extra, not a step-change
+## Other researched options (for reference)
 
-**At ~10 matches/day, the founder's $10 Prepay credit realistically lasts ~2-3 weeks**, not the
-"3-4 weeks" estimated before the escalation-rate finding above. Check remaining balance at
-`aistudio.google.com` → Billing before assuming the app can still call the paid tier — the credit
-does not auto-reload (confirmed off during setup).
+- **LiteLLM** ([github.com/BerriAI/litellm](https://github.com/BerriAI/litellm)) — open-source
+  unified LLM gateway (Python), supports both Gemini-AI-Studio and Vertex AI backends with
+  built-in cost tracking/caching. Requires running a separate Python service — likely overkill for
+  this app's current scale, worth knowing about for a bigger future project.
+- **Gemini implicit context caching** — already on by default for paid projects, gives ~90%
+  discount on repeated content (the system prompt was already being partially cached, confirmed
+  via `cachedContentTokenCount` in real responses) — this was NOT the cost problem; the
+  search-grounding token injection was.
 
-## If pricing/models change again
+## Real per-token pricing at the time (for reference, may be stale by the time this is read again)
 
-- Verify model availability LIVE for the actual API key first (`GET
-  https://generativelanguage.googleapis.com/v1beta/models?key=...`, then a real minimal
-  `generateContent` call) — `ListModels` showing a model doesn't guarantee it actually works for
-  this key/tier.
-- Re-fetch `ai.google.dev/gemini-api/docs/pricing` rather than trusting this file's numbers past
-  Dec 31, 2026 (Flash pricing is explicitly time-boxed in Google's own docs).
+- `gemini-3.6-flash`: $0.75/1M input, $3.75/1M output (through Dec 31, 2026)
+- `gemini-3.1-pro-preview`: $2.00/1M input (≤200k-token prompts; $4.00 above), $12.00/1M output
+  (≤200k; $18.00 above)
+- Google Search grounding: 5,000 free requests/month, then $14/1,000 requests (request COUNT
+  wasn't the constraint — this app used only 55 of 1,500/day on the Gemini 3.x tier — token VOLUME
+  per grounded request was)

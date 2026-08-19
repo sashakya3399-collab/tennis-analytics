@@ -9,25 +9,32 @@ troubleshooting session — see `git log` for the exact commit-by-commit fix his
 1. **GitHub** — a repo (this one). Must be **public**, or Netlify's free plan needs upgrading —
    see "Netlify gotchas" below.
 2. **Netlify** — a team + a site connected to the GitHub repo via continuous deployment.
-3. **Supabase** — a project. Run `supabase/schema.sql` once in the SQL Editor. Create at least
-   one Auth user manually (Authentication → Users → Add user) — there's no self-serve signup.
-4. **Gemini API** (aistudio.google.com) — API key on a project with the Prepay minimum ($10)
-   spent, so paid-tier billing is active (free tier hit zero-quota/deprecated-model dead ends on
-   2026-08-19). See `GEMINI_PRICING_NOTES.md`.
-5. **OpenWeatherMap** — free API key (activation can take up to ~2 hours after signup).
+3. **Supabase** — a project. Run `supabase/schema.sql` once in the SQL Editor (fresh project) or
+   `supabase/migration_2026-08-19_first_set_total_screenshot.sql` (existing project migrating from
+   the old daily-schedule/win-probability shape). Create at least one Auth user manually
+   (Authentication → Users → Add user) — there's no self-serve signup.
+4. **Groq** (console.groq.com) — free API key, no card.
+5. **Tavily** (tavily.com) — free API key, no card, 1000 credits/month.
+
+OpenWeatherMap and Gemini are no longer used (both removed 2026-08-19 — see
+`GEMINI_PRICING_NOTES.md` for why Gemini was dropped). Weather is now one of the things Tavily
+search looks up as part of the SET-1 analysis, not a separate pre-fetch API.
 
 ## Environment variables (Netlify → Project configuration → Environment variables)
 
 ```
-GEMINI_API_KEY=
-GEMINI_MODEL_FLASH=gemini-3.6-flash        # optional, this is the code default
-GEMINI_MODEL_PRO=gemini-3.1-pro-preview    # optional, this is the code default
+GROQ_API_KEY=
+GROQ_MODEL=groq/compound              # optional, this is the code default
+GROQ_VISION_MODEL=qwen/qwen3.6-27b    # optional, this is the code default
+TAVILY_API_KEY=
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
-OPENWEATHER_API_KEY=
 CRON_SECRET=            # any long random string, e.g. `openssl rand -hex 32`
 ```
+
+`OPENWEATHER_API_KEY`, `GEMINI_API_KEY`, `GEMINI_MODEL_FLASH`, `GEMINI_MODEL_PRO` can be removed
+from Netlify's environment variables — no longer read by any code path.
 
 **Note on which Netlify account**: this project deploys under a founder-dedicated account
 (`sashakya3399@gmail.com`), which may not be the account any given machine's `netlify` CLI is
@@ -59,25 +66,29 @@ a commit).
    method, the redirected request hits `/login` as a POST → `405 Method Not Allowed`. Already
    fixed in this repo's `middleware.ts`; don't remove the exclusion if you ever touch it.
 4. **Credit-based free plan** (2026 pricing) — 300 credits/month, deploys and function
-   invocations both draw from the same pool. Iterate cheaply: reproduce the exact Gemini call
-   chain locally with a plain Node `fetch` script or `curl` (real key is in `.env.local`) BEFORE
+   invocations both draw from the same pool. Iterate cheaply: reproduce the exact Groq/Tavily call
+   chain locally with a plain Node `fetch` script or `curl` (real keys are in `.env.local`) BEFORE
    pushing a fix, instead of deploy-and-see. Only push once a local reproduction confirms the fix.
 
-## Gemini gotchas
+## Groq gotchas
 
-- **`googleSearch`/`codeExecution` tool use is prompt-shape-sensitive** — an "ONLY json, no
-  prose" output instruction silently suppresses real search grounding; lead prompts with a short
-  "Search the web right now for: X" imperative and ask for a trailing fenced json block instead.
-  Full details: `~/.claude/skills/gemini-builtin-tool-invocation-prompt-shape/SKILL.md`.
-- **Even with a good prompt, grounding is non-deterministic per call** (~60-70% in live testing,
-  not 100%) — this app treats "didn't confirm grounding" as an escalation trigger to the Pro
-  model rather than assuming a prompt fix alone is sufficient. See `ARCHITECTURE.md`.
+- **Free tier caps `groq/compound` at 30,000 tokens/minute (org-wide)** on its internal routing
+  model. This app's own system prompt alone is ~13,000 tokens — a single analysis call requests
+  ~13-18K tokens, leaving little headroom for back-to-back calls. `callGroq()` in
+  `src/lib/groq/client.ts` retries automatically on 429, honoring the server's suggested delay —
+  don't rapid-fire manual test calls while debugging a rate-limit issue, that keeps the window
+  from ever clearing (confirmed live 2026-08-19: `Used` kept climbing between repeated test
+  attempts rather than resetting).
+- **`groq/compound`'s built-in web search tool is broken** (`413 Request Entity Too Large` on
+  most search-triggering prompts — a known, reported Groq platform issue). This app does its own
+  search via Tavily instead and tells the model not to search itself; the client auto-retries the
+  rare cases where Compound tries anyway.
+- **Vision (`qwen/qwen3.6-27b`) and code execution (`groq/compound`) are separate models/calls** —
+  not confirmed whether a single Groq call can do both; this app keeps them as two sequential
+  calls with independent free-tier quotas (30 RPM/1000 RPD vs. 30 RPM/250 RPD).
 - Check exact model availability for a given API key with `ListModels`
-  (`GET https://generativelanguage.googleapis.com/v1beta/models?key=...`), then confirm with a
-  real minimal `generateContent` call — don't assume a model name from documentation is actually
-  enabled/quota'd for a specific key and billing tier.
-- Prepay credit does not auto-reload — check `aistudio.google.com` → Billing before assuming the
-  paid tier is still active.
+  (`GET https://api.groq.com/openai/v1/models`) — don't assume a model name from documentation
+  is actually enabled/quota'd for a specific key.
 
 ## Local verification workflow (do this before every push, not after)
 
@@ -85,20 +96,30 @@ a commit).
 cd ~/Alish/tennis-analytics
 pnpm exec tsc --noEmit && pnpm run build && pnpm run lint
 
-# reproduce a real Gemini call directly:
+# reproduce a real Tavily search:
 source .env.local
-curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_FLASH}:generateContent?key=${GEMINI_API_KEY}" \
-  -H "content-type: application/json" \
-  -d '{"contents":[{"parts":[{"text":"..."}]}],"tools":[{"googleSearch":{}},{"codeExecution":{}}]}'
+curl -s -X POST "https://api.tavily.com/search" \
+  -H "content-type: application/json" -H "authorization: Bearer $TAVILY_API_KEY" \
+  -d '{"query":"...", "search_depth":"basic", "max_results":3}'
+
+# or a real Groq call:
+curl -s -X POST "https://api.groq.com/openai/v1/chat/completions" \
+  -H "Authorization: Bearer $GROQ_API_KEY" -H "content-type: application/json" \
+  -d '{"model":"groq/compound","messages":[{"role":"user","content":"..."}]}'
 ```
 
 ## Manual end-to-end test (once deployed)
 
+Screenshot upload is easiest tested through the actual dashboard UI (file input → submit). To test
+the Background Function directly instead (bypassing the UI), base64-encode a real screenshot file
+first:
+
 ```bash
 source .env.local
+IMG_B64=$(base64 -i /path/to/screenshot.png)
 curl -s -X POST "https://<site>.netlify.app/.netlify/functions/run-analysis-background" \
   -H "content-type: application/json" -H "authorization: Bearer $CRON_SECRET" \
-  -d '{"mode":"manual_pre_match","playerA":"...","playerB":"...","surface":"Hard","location":"..."}'
+  -d "{\"mode\":\"screenshot_pre_match\",\"imageBase64\":\"$IMG_B64\",\"mimeType\":\"image/png\"}"
 # -> expect HTTP 202 immediately; the actual result lands in Supabase a bit later
 ```
 

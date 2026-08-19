@@ -1,60 +1,45 @@
 "use client";
 
-import { useActionState } from "react";
-import { createManualAnalysis, type ManualActionState } from "@/app/actions/manual-analysis";
+import { useActionState, useRef } from "react";
+import { analyzeScreenshotAction, type ManualActionState } from "@/app/actions/manual-analysis";
 
 export function ManualAnalysisForm() {
   const [state, formAction, pending] = useActionState<ManualActionState, FormData>(
-    createManualAnalysis,
+    analyzeScreenshotAction,
     null,
   );
+  const formRef = useRef<HTMLFormElement>(null);
 
   return (
-    <form action={formAction} className="grid grid-cols-1 gap-3 sm:grid-cols-5 sm:items-end">
-      <div className="sm:col-span-1">
-        <label className="mb-1 block text-xs text-neutral-500">Игрок 1</label>
+    <form
+      ref={formRef}
+      action={(formData) => {
+        formAction(formData);
+        formRef.current?.reset();
+      }}
+      className="flex flex-wrap items-end gap-3"
+    >
+      <div className="flex-1">
+        <label className="mb-1 block text-xs text-neutral-500">Скриншот (линии/тотал 1-го сета)</label>
         <input
-          name="player_a"
+          name="screenshot"
+          type="file"
+          accept="image/*"
           required
-          className="w-full rounded-md border border-neutral-300 bg-transparent px-2 py-1.5 text-sm outline-none focus:border-neutral-500 dark:border-neutral-700"
+          className="block w-full text-sm text-neutral-600 file:mr-3 file:rounded-md file:border-0 file:bg-neutral-900 file:px-3 file:py-1.5 file:text-sm file:text-white hover:file:opacity-90 dark:text-neutral-400 dark:file:bg-white dark:file:text-neutral-900"
         />
       </div>
-      <div className="sm:col-span-1">
-        <label className="mb-1 block text-xs text-neutral-500">Игрок 2</label>
-        <input
-          name="player_b"
-          required
-          className="w-full rounded-md border border-neutral-300 bg-transparent px-2 py-1.5 text-sm outline-none focus:border-neutral-500 dark:border-neutral-700"
-        />
-      </div>
-      <div className="sm:col-span-1">
-        <label className="mb-1 block text-xs text-neutral-500">Покрытие</label>
-        <input
-          name="surface"
-          placeholder="Hard/Clay/Grass"
-          className="w-full rounded-md border border-neutral-300 bg-transparent px-2 py-1.5 text-sm outline-none focus:border-neutral-500 dark:border-neutral-700"
-        />
-      </div>
-      <div className="sm:col-span-1">
-        <label className="mb-1 block text-xs text-neutral-500">Турнир / город (опц.)</label>
-        <input
-          name="tournament"
-          className="w-full rounded-md border border-neutral-300 bg-transparent px-2 py-1.5 text-sm outline-none focus:border-neutral-500 dark:border-neutral-700"
-        />
-      </div>
-      <div className="sm:col-span-1">
-        <button
-          type="submit"
-          disabled={pending}
-          className="w-full rounded-md bg-neutral-900 px-3 py-1.5 text-sm text-white transition-opacity hover:opacity-90 disabled:opacity-50 dark:bg-white dark:text-neutral-900"
-        >
-          {pending ? "Запуск..." : "Проанализировать"}
-        </button>
-      </div>
-      {state?.error && <p className="text-sm text-red-600 sm:col-span-5">{state.error}</p>}
+      <button
+        type="submit"
+        disabled={pending}
+        className="rounded-md bg-neutral-900 px-4 py-1.5 text-sm text-white transition-opacity hover:opacity-90 disabled:opacity-50 dark:bg-white dark:text-neutral-900"
+      >
+        {pending ? "Загрузка..." : "Проанализировать"}
+      </button>
+      {state?.error && <p className="w-full text-sm text-red-600">{state.error}</p>}
       {state?.started && (
-        <p className="text-sm text-neutral-500 sm:col-span-5">
-          Запущено в фоне — карточка появится ниже через 30-60 секунд (обновите страницу).
+        <p className="w-full text-sm text-neutral-500">
+          Запущено в фоне — карточка появится ниже через 30-90 секунд (обновите страницу).
         </p>
       )}
     </form>

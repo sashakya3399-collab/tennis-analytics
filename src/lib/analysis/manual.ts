@@ -1,61 +1,41 @@
 import { createAdminClient } from "../supabase/admin";
-import { analyzeMatch, analyzeLiveUpdate, summaryToColumns } from "./match";
-import { getWeatherForLocation } from "../weather/openweather";
-
-export type ManualMatchInput = {
-  playerA: string;
-  playerB: string;
-  surface?: string | null;
-  tournament?: string | null;
-  location?: string | null;
-};
+import { analyzeScreenshot, analyzeLiveUpdate, summaryToColumns } from "./match";
+import type { GroqImage } from "../groq/client";
 
 /**
- * Addendum section 077 — "PLAYER_1 / PLAYER_2 / SURFACE, immediately run
- * PRE-MATCH, no questions asked." Ad-hoc counterpart to runDailyAnalysis:
- * not tied to the auto-discovered daily schedule, triggered directly from
- * the dashboard form for any pair the founder wants to look up right now.
+ * Addendum section 077 (2026-08-19 pivot — screenshot-only input): the
+ * user uploads a screenshot; analyzeScreenshot() runs the 3-step
+ * vision-extraction → Tavily search → groq/compound analysis chain and
+ * returns everything (including the extracted player names) in one
+ * result — there's no separate "create the row, then analyze" step since
+ * we don't know the player names until the vision step has read the image.
  *
  * Runs fire-and-forget from a Netlify Background Function (see
  * netlify/functions/run-analysis-background.ts) — there's no caller left
- * to hand a thrown error to by the time Gemini responds, so failures are
- * caught here and written onto the row as `last_error` instead of thrown,
- * matching how runDailyAnalysis self-reports onto analysis_runs.
+ * to hand a thrown error to by the time Groq responds, so failures are
+ * caught here. Since we don't have a row to attach last_error to until
+ * AFTER the analysis (player names aren't known yet), a failure here
+ * creates a row with placeholder player names so it's still visible on the
+ * dashboard rather than silently vanishing.
  */
-export async function runManualPreMatch(input: ManualMatchInput): Promise<{ manualAnalysisId: string }> {
+export async function runScreenshotAnalysis(image: GroqImage): Promise<{ manualAnalysisId: string }> {
   const supabase = createAdminClient();
 
-  const { data: parent, error: parentError } = await supabase
-    .from("manual_analyses")
-    .insert({
-      player_a: input.playerA,
-      player_b: input.playerB,
-      surface: input.surface ?? null,
-      tournament: input.tournament ?? null,
-      location: input.location ?? null,
-    })
-    .select("id")
-    .single();
-
-  if (parentError || !parent) {
-    throw new Error(`Failed to create manual_analyses row: ${parentError?.message}`);
-  }
-
   try {
-    const weather = input.location ? await getWeatherForLocation(input.location) : null;
+    const analysis = await analyzeScreenshot(image);
 
-    const analysis = await analyzeMatch(
-      {
-        tournament: input.tournament ?? "unspecified",
-        round: null,
-        surface: input.surface ?? null,
-        location: input.location ?? null,
-        player_a: input.playerA,
-        player_b: input.playerB,
-        scheduled_time: null,
-      },
-      weather,
-    );
+    const playerA = analysis.summary?.player_a?.trim() || "Игрок 1 (не распознан)";
+    const playerB = analysis.summary?.player_b?.trim() || "Игрок 2 (не распознан)";
+
+    const { data: parent, error: parentError } = await supabase
+      .from("manual_analyses")
+      .insert({ player_a: playerA, player_b: playerB })
+      .select("id")
+      .single();
+
+    if (parentError || !parent) {
+      throw new Error(`Failed to create manual_analyses row: ${parentError?.message}`);
+    }
 
     const { error: entryError } = await supabase.from("manual_analysis_entries").insert({
       manual_analysis_id: parent.id,
@@ -71,13 +51,21 @@ export async function runManualPreMatch(input: ManualMatchInput): Promise<{ manu
     if (entryError) {
       throw new Error(`Failed to create manual_analysis_entries row: ${entryError.message}`);
     }
+
+    return { manualAnalysisId: parent.id };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await supabase.from("manual_analyses").update({ last_error: message }).eq("id", parent.id);
-    throw err;
+    const { data: failedRow } = await supabase
+      .from("manual_analyses")
+      .insert({
+        player_a: "Ошибка распознавания",
+        player_b: "Ошибка распознавания",
+        last_error: message,
+      })
+      .select("id")
+      .single();
+    return { manualAnalysisId: failedRow?.id ?? "" };
   }
-
-  return { manualAnalysisId: parent.id };
 }
 
 /**
@@ -101,24 +89,21 @@ export async function runManualLiveUpdate(manualAnalysisId: string, liveScore: s
 
     const { data: priorEntry, error: priorError } = await supabase
       .from("manual_analysis_entries")
-      .select("full_report")
+      .select("full_report, surface")
       .eq("manual_analysis_id", manualAnalysisId)
       .order("created_at", { ascending: false })
       .limit(1)
       .single();
 
     if (priorError || !priorEntry) {
-      throw new Error("No prior analysis found for this pair — run a PRE-MATCH analysis first.");
+      throw new Error("No prior analysis found for this pair — analyze a screenshot first.");
     }
 
     const analysis = await analyzeLiveUpdate(
       {
-        tournament: parent.tournament,
-        round: null,
-        surface: parent.surface,
-        location: parent.location,
         playerA: parent.player_a,
         playerB: parent.player_b,
+        surface: priorEntry.surface,
         priorFullReport: priorEntry.full_report,
       },
       liveScore,

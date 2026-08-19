@@ -1,17 +1,15 @@
 import type { Config } from "@netlify/functions";
-import { runDailyAnalysis } from "../../src/lib/analysis/run-daily-analysis";
-import { runManualPreMatch, runManualLiveUpdate } from "../../src/lib/analysis/manual";
+import { runScreenshotAnalysis, runManualLiveUpdate } from "../../src/lib/analysis/manual";
 import type { BackgroundAnalysisPayload } from "../../src/lib/analysis/trigger";
 
 /**
- * The ONE place where the actual Gemini/Matrix-Engine work happens —
- * scheduled daily runs, manual dashboard re-runs, ad-hoc PLAYER_1/PLAYER_2
- * lookups, and LIVE score updates all funnel through this single Netlify
- * Background Function (15-minute execution budget), triggered via
- * triggerBackgroundAnalysis() from either the Scheduled Function
- * (daily-analysis.ts) or a Server Action. Kept as ONE dispatcher rather
- * than one background function per mode so there's a single place that
- * enforces the auth check and a single deploy artifact to reason about.
+ * The ONE place where the actual Groq/Matrix-Engine work happens —
+ * screenshot uploads and LIVE score updates funnel through this single
+ * Netlify Background Function (15-minute execution budget), triggered via
+ * triggerBackgroundAnalysis() from a Server Action. Kept as ONE dispatcher
+ * rather than one background function per mode so there's a single place
+ * that enforces the auth check and a single deploy artifact to reason
+ * about.
  *
  * Imports use relative paths into src/lib, not the `@/` tsconfig alias —
  * this file is bundled by Netlify's own esbuild function bundler, not
@@ -36,27 +34,18 @@ const handler = async (req: Request) => {
   }
 
   try {
-    if (payload.mode === "daily") {
-      await runDailyAnalysis(payload.dateISO, payload.runTrigger);
-    } else if (payload.mode === "manual_pre_match") {
-      await runManualPreMatch({
-        playerA: payload.playerA,
-        playerB: payload.playerB,
-        surface: payload.surface,
-        tournament: payload.tournament,
-        location: payload.location,
-      });
+    if (payload.mode === "screenshot_pre_match") {
+      await runScreenshotAnalysis({ mimeType: payload.mimeType, dataBase64: payload.imageBase64 });
     } else if (payload.mode === "manual_live") {
       await runManualLiveUpdate(payload.manualAnalysisId, payload.liveScore);
     } else {
       console.error("Unknown background analysis mode:", payload);
     }
   } catch (err) {
-    // Both runDailyAnalysis and the manual.ts functions already persist
-    // their own failure state onto the relevant row (analysis_runs /
-    // manual_analyses.last_error) before rethrowing — this catch is just
-    // the last-resort log, since there's no HTTP caller left waiting by
-    // the time a Gemini call fails.
+    // manual.ts already persists its own failure state onto the relevant
+    // row (manual_analyses.last_error) before rethrowing — this catch is
+    // just the last-resort log, since there's no HTTP caller left waiting
+    // by the time a Groq call fails.
     console.error("Background analysis run failed:", err);
   }
 };

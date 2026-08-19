@@ -1,26 +1,17 @@
 export type BackgroundAnalysisPayload =
-  | { mode: "daily"; dateISO: string; runTrigger: "scheduled" | "manual" }
-  | {
-      mode: "manual_pre_match";
-      playerA: string;
-      playerB: string;
-      surface: string | null;
-      tournament: string | null;
-      location: string | null;
-    }
+  | { mode: "screenshot_pre_match"; imageBase64: string; mimeType: string }
   | { mode: "manual_live"; manualAnalysisId: string; liveScore: string };
 
 /**
- * Fires the Netlify Background Function that does the actual Gemini work
- * (netlify/functions/run-analysis-background.ts) and returns as soon as
- * Netlify's platform hands back its 202 ack — NOT once the analysis
+ * Fires the Netlify Background Function that does the actual Groq/Tavily
+ * work (netlify/functions/run-analysis-background.ts) and returns as soon
+ * as Netlify's platform hands back its 202 ack — NOT once the analysis
  * itself finishes. This exists because Netlify caps synchronous
- * functions/Server Actions at 10s (free) / 26s (paid), while a single
- * Gemini call with search + code execution routinely takes
- * 20-60+ seconds (and a hybrid escalation to Pro means two such calls back
- * to back), and the daily/manual pipelines make several such calls
- * in a row — see project memory for the investigation. Background
- * Functions get a 15-minute budget instead.
+ * functions/Server Actions at 10s (free) / 26s (paid), while the
+ * screenshot analysis chain (vision extraction + 3 Tavily searches + a
+ * groq/compound call with code execution) routinely takes 30-90+ seconds —
+ * see project memory for the investigation. Background Functions get a
+ * 15-minute budget instead.
  *
  * Requires running on Netlify (`netlify dev` locally, or deployed) — the
  * `URL` env var Netlify injects at runtime is what makes this reachable;

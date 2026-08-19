@@ -15,32 +15,45 @@ async function requireUser() {
   return user;
 }
 
-/**
- * Both actions below only fire the Background Function and return — see
- * trigger.ts for why (Gemini calls with search + code execution routinely exceed
- * Netlify's 10s/26s Server Action timeout). The result appears on the
- * dashboard a bit later; there's no live "here's your analysis" response.
- */
+// Netlify Background Function invocations carry the image as base64 inside
+// the JSON POST body — cap the ORIGINAL file well under typical Lambda-style
+// payload ceilings (base64 adds ~33% overhead) rather than finding out via a
+// mysterious 413/502 on a large screenshot.
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-export async function createManualAnalysis(
+/**
+ * Screenshot upload → fires the Background Function and returns — see
+ * trigger.ts for why (the vision + search + code-execution chain routinely
+ * exceeds Netlify's 10s/26s Server Action timeout). The result appears on
+ * the dashboard a bit later; there's no live "here's your analysis"
+ * response.
+ */
+export async function analyzeScreenshotAction(
   _prev: ManualActionState,
   formData: FormData,
 ): Promise<ManualActionState> {
   const user = await requireUser();
   if (!user) return { error: "Требуется вход в систему." };
 
-  const playerA = String(formData.get("player_a") ?? "").trim();
-  const playerB = String(formData.get("player_b") ?? "").trim();
-  if (!playerA || !playerB) return { error: "Укажите обоих игроков." };
+  const file = formData.get("screenshot");
+  if (!(file instanceof File) || file.size === 0) {
+    return { error: "Выберите файл скриншота." };
+  }
+  if (!file.type.startsWith("image/")) {
+    return { error: "Файл должен быть изображением (PNG/JPEG/WebP)." };
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    return { error: `Файл слишком большой (макс. ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB).` };
+  }
 
   try {
+    const bytes = await file.arrayBuffer();
+    const imageBase64 = Buffer.from(bytes).toString("base64");
+
     await triggerBackgroundAnalysis({
-      mode: "manual_pre_match",
-      playerA,
-      playerB,
-      surface: String(formData.get("surface") ?? "").trim() || null,
-      tournament: String(formData.get("tournament") ?? "").trim() || null,
-      location: String(formData.get("location") ?? "").trim() || null,
+      mode: "screenshot_pre_match",
+      imageBase64,
+      mimeType: file.type,
     });
     return { started: true };
   } catch (err) {
