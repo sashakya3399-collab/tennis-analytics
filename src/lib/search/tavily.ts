@@ -13,7 +13,7 @@ export type WebSearchResult = {
  * real results into the prompt as context instead of relying on Compound
  * to search for itself.
  */
-export async function searchWeb(query: string, maxResults = 5): Promise<WebSearchResult> {
+export async function searchWeb(query: string, maxResults = 3): Promise<WebSearchResult> {
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) {
     throw new Error("TAVILY_API_KEY is not set. Add it to .env.local.");
@@ -49,12 +49,26 @@ export async function searchWeb(query: string, maxResults = 5): Promise<WebSearc
   };
 }
 
-/** Renders search results as plain text to embed inline in an LLM prompt. */
+const MAX_SNIPPET_CHARS = 400;
+
+/**
+ * Renders search results as plain text to embed inline in an LLM prompt.
+ * Content is truncated per-result — Groq's groq/compound routes prompts
+ * through an internal sub-model (meta-llama/llama-4-scout) capped at 30K
+ * tokens/minute on the free tier, and the full ~13K-token system prompt
+ * already uses most of that budget on its own; untruncated multi-paragraph
+ * Tavily snippets pushed single calls to ~20K input tokens (confirmed live,
+ * 2026-08-19), leaving almost no headroom before hitting 429s.
+ */
 export function formatSearchResults(label: string, search: WebSearchResult): string {
   const lines = [`SEARCH RESULTS — ${label}:`];
   if (search.answer) lines.push(`Summary: ${search.answer}`);
   search.results.forEach((r, i) => {
-    lines.push(`[${i + 1}] ${r.title} (${r.url})\n${r.content}`);
+    const snippet =
+      r.content.length > MAX_SNIPPET_CHARS
+        ? `${r.content.slice(0, MAX_SNIPPET_CHARS)}…`
+        : r.content;
+    lines.push(`[${i + 1}] ${r.title} (${r.url})\n${snippet}`);
   });
   if (search.results.length === 0 && !search.answer) {
     lines.push("(no results found)");

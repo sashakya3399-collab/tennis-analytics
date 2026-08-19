@@ -102,7 +102,7 @@ export async function fetchTodaysSchedule(dateISO: string): Promise<{
 }> {
   const search = await searchWeb(
     `ATP WTA tennis order of play schedule matches ${dateISO}`,
-    8,
+    6,
   );
   const searchContext = formatSearchResults(`ATP/WTA schedule for ${dateISO}`, search);
 

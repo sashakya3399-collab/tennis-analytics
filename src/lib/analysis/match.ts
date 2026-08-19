@@ -146,11 +146,11 @@ export async function analyzeMatch(
   const [formSearch, statsSearch] = await Promise.all([
     searchWeb(
       `${match.player_a} vs ${match.player_b} tennis head-to-head ranking recent results 2026`,
-      6,
+      3,
     ),
     searchWeb(
       `${match.player_a} ${match.player_b} ${match.surface ?? ""} court stats first serve percentage ${match.location ?? ""} elevation altitude`,
-      6,
+      3,
     ),
   ]);
   const searchContext = [
