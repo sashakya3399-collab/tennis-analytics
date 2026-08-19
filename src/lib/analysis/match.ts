@@ -251,6 +251,11 @@ replaces the spec's default LAST-10 language for the general surface sample; add
 "РЕЙТИНГ", and "МОТИВАЦИЯ" lines to the dashboard). Immediately after the PRE FINAL DASHBOARD, also
 output the compact "🎾 МАТЕМАТИЧЕСКИЙ ИТОГ" block per addendum section 075.
 
+REMINDER (this is not optional): you do not have a working web-search tool in this call. If
+anything above is missing from the search results, write "нет данных" for that specific point and
+continue — do NOT call a search tool to try to find it, that call will fail and abort your entire
+response. Code execution is the only tool available and expected here.
+
 After both blocks, append exactly one fenced block:
 \`\`\`json
 ${TRAILING_JSON_SHAPE}

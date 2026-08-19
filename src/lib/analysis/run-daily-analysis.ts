@@ -11,6 +11,19 @@ export type DailyRunResult = {
   errors: string[];
 };
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Groq's free tier caps groq/compound's internal routing model at 30K
+// tokens/minute (org-wide), and one match analysis call alone requests
+// ~14-18K tokens (confirmed live 2026-08-19) — firing them back-to-back in
+// a loop exhausts that budget after 1-2 matches. Spacing calls by 40s keeps
+// sustained throughput safely under the ceiling (~21-27K tokens/min
+// average) without needing a paid tier. The Background Function has a
+// 15-minute budget, so this comfortably fits even a ~15-match day.
+const MATCH_ANALYSIS_SPACING_MS = 40_000;
+
 /**
  * The full daily job: find today's real schedule, fetch weather per match,
  * run the Matrix Engine analysis per match, persist everything. Designed to
@@ -45,7 +58,9 @@ export async function runDailyAnalysis(
     matchesFound = schedule.length;
     matchesFilteredOut = filteredOutCount;
 
-    for (const match of schedule) {
+    for (const [index, match] of schedule.entries()) {
+      if (index > 0) await sleep(MATCH_ANALYSIS_SPACING_MS);
+
       try {
         const weather = match.location ? await getWeatherForLocation(match.location) : null;
 
