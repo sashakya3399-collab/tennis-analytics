@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { logout } from "@/app/actions/auth";
 import { RerunButton } from "@/app/components/RerunButton";
 import { ManualAnalysisForm } from "@/app/components/ManualAnalysisForm";
+import { deleteManualAnalysis } from "@/app/actions/manual-analysis";
 import { LiveUpdateForm } from "@/app/components/LiveUpdateForm";
 import { AnalysisSummaryGrid, type AnalysisFields } from "@/app/components/AnalysisSummary";
 
@@ -181,9 +182,20 @@ export default async function DashboardPage() {
                   <h3 className="text-lg font-medium">
                     {pair.player_a} vs {pair.player_b}
                   </h3>
-                  <span className="text-sm text-neutral-500">
-                    {pair.tournament ?? ""} {pair.surface ? `· ${pair.surface}` : ""}
-                  </span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm text-neutral-500">
+                      {pair.tournament ?? ""} {pair.surface ? `· ${pair.surface}` : ""}
+                    </span>
+                    <form action={deleteManualAnalysis}>
+                      <input type="hidden" name="manual_analysis_id" value={pair.id} />
+                      <button
+                        type="submit"
+                        className="text-sm text-neutral-500 hover:text-red-600 hover:underline"
+                      >
+                        Удалить
+                      </button>
+                    </form>
+                  </div>
                 </div>
 
                 {pair.last_error && (

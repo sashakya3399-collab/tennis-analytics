@@ -171,7 +171,7 @@ to actually run the Elo, Bayesian shrinkage, hold/break, and Markov-chain set/ma
 math the spec describes — do not eyeball or mentally approximate the numbers.
 
 MATCH:
-Tournament: ${match.tournament}
+Tournament: ${match.tournament ?? "unknown"}
 Round: ${match.round ?? "unknown"}
 Surface: ${match.surface ?? "unknown"}
 Location: ${match.location ?? "unknown"}

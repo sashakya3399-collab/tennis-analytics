@@ -3,7 +3,11 @@ import { generateText } from "../groq/client";
 import { searchWeb, formatSearchResults } from "../search/tavily";
 
 const ScheduledMatchSchema = z.object({
-  tournament: z.string(),
+  // Nullable: the extraction model occasionally returns null here even
+  // though instructed otherwise (confirmed live 2026-08-19 — real matches,
+  // just a missing tournament field) — schema must tolerate real model
+  // output rather than crash the whole batch on one field.
+  tournament: z.string().nullable(),
   tour_level: z.string().nullable().optional(),
   round: z.string().nullable().optional(),
   surface: z.string().nullable().optional(),
@@ -70,6 +74,10 @@ const TOP_TIER_LEVEL_HINTS = [
 ];
 
 export function isTopTierSinglesMatch(match: ScheduledMatch): boolean {
+  // No tournament name at all means the top-tier level can't be verified —
+  // exclude rather than silently assume it's fine.
+  if (!match.tournament) return false;
+
   const haystack = `${match.tournament} ${match.round ?? ""} ${match.tour_level ?? ""}`.toLowerCase();
 
   if (EXCLUDE_KEYWORDS.some((kw) => haystack.includes(kw))) return false;

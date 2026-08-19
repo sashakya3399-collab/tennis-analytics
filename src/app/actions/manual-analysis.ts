@@ -1,6 +1,8 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { triggerBackgroundAnalysis } from "@/lib/analysis/trigger";
 
 export type ManualActionState = { error?: string; started?: boolean } | null;
@@ -65,4 +67,17 @@ export async function addLiveUpdate(
     const message = err instanceof Error ? err.message : String(err);
     return { error: message };
   }
+}
+
+/** Removes a manual analysis pair (and its entries, via FK cascade) — dashboard cleanup. */
+export async function deleteManualAnalysis(formData: FormData): Promise<void> {
+  const user = await requireUser();
+  if (!user) return;
+
+  const manualAnalysisId = String(formData.get("manual_analysis_id") ?? "");
+  if (!manualAnalysisId) return;
+
+  const supabase = createAdminClient();
+  await supabase.from("manual_analyses").delete().eq("id", manualAnalysisId);
+  revalidatePath("/");
 }
