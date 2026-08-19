@@ -1,6 +1,6 @@
 export type WebSearchResult = {
   answer: string | null;
-  results: { title: string; url: string; content: string }[];
+  results: { title: string; url: string; content: string; publishedDate: string | null }[];
 };
 
 /**
@@ -13,7 +13,23 @@ export type WebSearchResult = {
  * real results into the prompt as context instead of relying on Compound
  * to search for itself.
  */
-export async function searchWeb(query: string, maxResults = 3): Promise<WebSearchResult> {
+/**
+ * topic: "news" biases results toward recently-published, dated content
+ * (live scores, news articles) over static reference documents. This
+ * matters a lot for anything time-sensitive: the default "general" topic
+ * surfaced a stale WTA order-of-play PDF (a URL that gets overwritten
+ * daily, so a cached/indexed copy can silently reflect an earlier day) as
+ * the top result for a schedule query, and every match extracted from it
+ * turned out to be from a day that had already passed (confirmed live,
+ * 2026-08-19 — none of the 5 "today's matches" it produced corresponded to
+ * the tournament's actual current round). "news" topic reliably returns
+ * results with a real publishedDate instead.
+ */
+export async function searchWeb(
+  query: string,
+  maxResults = 3,
+  topic: "general" | "news" = "general",
+): Promise<WebSearchResult> {
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) {
     throw new Error("TAVILY_API_KEY is not set. Add it to .env.local.");
@@ -30,6 +46,7 @@ export async function searchWeb(query: string, maxResults = 3): Promise<WebSearc
       search_depth: "basic",
       max_results: maxResults,
       include_answer: "basic",
+      topic,
     }),
   });
 
@@ -41,11 +58,14 @@ export async function searchWeb(query: string, maxResults = 3): Promise<WebSearc
   const data = await res.json();
   return {
     answer: data.answer ?? null,
-    results: (data.results ?? []).map((r: { title: string; url: string; content: string }) => ({
-      title: r.title,
-      url: r.url,
-      content: r.content,
-    })),
+    results: (data.results ?? []).map(
+      (r: { title: string; url: string; content: string; published_date?: string }) => ({
+        title: r.title,
+        url: r.url,
+        content: r.content,
+        publishedDate: r.published_date ?? null,
+      }),
+    ),
   };
 }
 
@@ -68,7 +88,8 @@ export function formatSearchResults(label: string, search: WebSearchResult): str
       r.content.length > MAX_SNIPPET_CHARS
         ? `${r.content.slice(0, MAX_SNIPPET_CHARS)}…`
         : r.content;
-    lines.push(`[${i + 1}] ${r.title} (${r.url})\n${snippet}`);
+    const dateNote = r.publishedDate ? ` [published: ${r.publishedDate}]` : " [no publish date — treat as possibly stale]";
+    lines.push(`[${i + 1}] ${r.title}${dateNote} (${r.url})\n${snippet}`);
   });
   if (search.results.length === 0 && !search.answer) {
     lines.push("(no results found)");

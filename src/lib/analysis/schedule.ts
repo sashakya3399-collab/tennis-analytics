@@ -108,16 +108,26 @@ export async function fetchTodaysSchedule(dateISO: string): Promise<{
   matches: ScheduledMatch[];
   filteredOutCount: number;
 }> {
-  // Two separate searches, not one: an order-of-play page usually lists
-  // real match pairings WITHOUT ever stating the tournament name in its own
+  // Two separate searches, not one: order-of-play pages usually list real
+  // match pairings WITHOUT ever stating the tournament name in their own
   // text (confirmed live 2026-08-19 — a real WTA order-of-play PDF just
   // said "> ATP" / "> WTA" per match, no tournament name at all), while a
   // tour-calendar-style page reliably names which tournament is on for a
   // given week. Both get handed to the model together so it can
   // cross-reference rather than default to null when one source alone is
   // incomplete.
+  //
+  // topic:"news" (not the default "general") and a "today's round / live
+  // scores" phrasing, not "order of play" — confirmed live 2026-08-19 that
+  // a generic "order of play" query surfaced a stale, undated PDF at a
+  // fixed URL (wtafiles.wtatennis.com/.../OP.pdf — the kind of URL a
+  // tournament overwrites daily, so a cached/indexed copy can silently be
+  // from an earlier day) and every match extracted from it turned out to
+  // be from a round that had already passed. A "today's round / live
+  // scores" news-topic query instead reliably surfaces dated per-match
+  // official tour pages.
   const [matchesSearch, tournamentSearch] = await Promise.all([
-    searchWeb(`ATP WTA tennis order of play schedule matches ${dateISO}`, 5),
+    searchWeb(`ATP WTA tennis today's round live scores results ${dateISO}`, 6, "news"),
     searchWeb(`what ATP WTA tennis tournament is being played on ${dateISO}`, 3),
   ]);
   const searchContext = [
@@ -130,6 +140,16 @@ export async function fetchTodaysSchedule(dateISO: string): Promise<{
 Based ONLY on the real search results above (do not use prior knowledge, do not invent matches —
 if the results don't clearly show a match, leave it out), extract the top-tier ATP Tour and WTA
 Tour SINGLES matches SCHEDULED for ${dateISO}.
+
+FRESHNESS CHECK (mandatory, do not skip): before including any match, check the [published: ...]
+date tag next to the source it came from. If a source has no publish date, or its publish date is
+more than 1-2 days before ${dateISO}, treat its match pairings as POSSIBLY STALE — a page can sit
+at the same URL and get overwritten daily by the tournament, so a cached/indexed copy can reflect
+an earlier day's play, not today's. Prefer sources whose publish date is on or within a day of
+${dateISO} and whose content mentions a specific round (e.g. "Round of 32", "Quarterfinal") that
+is internally consistent across multiple sources — if two sources disagree on which round is
+current, trust the more recently published one. If you cannot find a confidently CURRENT source
+for a specific pairing, leave it out rather than including a possibly-stale match.
 
 IMPORTANT: the match-pairings source often does NOT state the tournament name in its own text
 (e.g. an order-of-play page may just say "ATP" / "WTA" per match with no tournament name visible).
