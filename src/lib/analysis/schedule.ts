@@ -108,17 +108,34 @@ export async function fetchTodaysSchedule(dateISO: string): Promise<{
   matches: ScheduledMatch[];
   filteredOutCount: number;
 }> {
-  const search = await searchWeb(
-    `ATP WTA tennis order of play schedule matches ${dateISO}`,
-    6,
-  );
-  const searchContext = formatSearchResults(`ATP/WTA schedule for ${dateISO}`, search);
+  // Two separate searches, not one: an order-of-play page usually lists
+  // real match pairings WITHOUT ever stating the tournament name in its own
+  // text (confirmed live 2026-08-19 — a real WTA order-of-play PDF just
+  // said "> ATP" / "> WTA" per match, no tournament name at all), while a
+  // tour-calendar-style page reliably names which tournament is on for a
+  // given week. Both get handed to the model together so it can
+  // cross-reference rather than default to null when one source alone is
+  // incomplete.
+  const [matchesSearch, tournamentSearch] = await Promise.all([
+    searchWeb(`ATP WTA tennis order of play schedule matches ${dateISO}`, 5),
+    searchWeb(`what ATP WTA tennis tournament is being played on ${dateISO}`, 3),
+  ]);
+  const searchContext = [
+    formatSearchResults(`Match pairings for ${dateISO}`, matchesSearch),
+    formatSearchResults(`Which tournament is on around ${dateISO}`, tournamentSearch),
+  ].join("\n\n---\n\n");
 
   const prompt = `${searchContext}
 
 Based ONLY on the real search results above (do not use prior knowledge, do not invent matches —
 if the results don't clearly show a match, leave it out), extract the top-tier ATP Tour and WTA
 Tour SINGLES matches SCHEDULED for ${dateISO}.
+
+IMPORTANT: the match-pairings source often does NOT state the tournament name in its own text
+(e.g. an order-of-play page may just say "ATP" / "WTA" per match with no tournament name visible).
+When that happens, CROSS-REFERENCE the second search block above (which tournament is on around
+this date) to identify the tournament — do not leave "tournament" null just because one source
+alone didn't name it, if the other source makes it clear from the date/week.
 
 ONLY include matches from top-tier tour-level events:
 - Grand Slams (Australian Open, Roland Garros/French Open, Wimbledon, US Open)
