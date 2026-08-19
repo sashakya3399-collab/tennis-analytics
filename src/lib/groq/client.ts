@@ -25,6 +25,31 @@ function getTextModel(): string {
 type GroqMessage = { role: "system" | "user" | "assistant"; content: string };
 type GroqToolCall = { type: string; [key: string]: unknown };
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Pulls "Please try again in 14.368s" out of a Groq 429 error body, if present. */
+function parseRetryDelayMs(body: string): number | null {
+  const match = body.match(/try again in ([\d.]+)s/i);
+  if (!match) return null;
+  const seconds = parseFloat(match[1]);
+  return Number.isFinite(seconds) ? Math.ceil(seconds * 1000) : null;
+}
+
+const MAX_RETRIES = 2;
+
+/**
+ * Two known, real, recoverable Groq failure modes (confirmed live
+ * 2026-08-19) get automatic retries here rather than surfacing to the
+ * caller immediately:
+ * - 429 (TPM rate limit): honors the server's own suggested retry delay.
+ * - 413 (compound's built-in search tool firing despite being told not
+ *   to): this appears non-deterministic per call — a short-delay retry
+ *   often succeeds on the next attempt without hitting the same bug.
+ * Any other status is NOT retried — it's either a real error worth
+ * surfacing immediately, or not something a retry would fix.
+ */
 async function callGroq(
   model: string,
   messages: GroqMessage[],
@@ -34,26 +59,37 @@ async function callGroq(
     throw new Error("GROQ_API_KEY is not set. Add it to .env.local.");
   }
 
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ model, messages }),
-  });
+  let lastError: Error | null = null;
 
-  if (!res.ok) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ model, messages }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const message = data.choices?.[0]?.message;
+      const content: string | undefined = message?.content;
+      if (!content) throw new Error("Groq returned an empty response.");
+      return { content, executedTools: message?.executed_tools ?? [] };
+    }
+
     const body = await res.text();
-    throw new Error(`Groq API call failed (HTTP ${res.status}): ${body.slice(0, 500)}`);
+    lastError = new Error(`Groq API call failed (HTTP ${res.status}): ${body.slice(0, 500)}`);
+
+    const canRetry = attempt < MAX_RETRIES && (res.status === 429 || res.status === 413);
+    if (!canRetry) throw lastError;
+
+    const delayMs = res.status === 429 ? (parseRetryDelayMs(body) ?? 20_000) : 5_000;
+    await sleep(Math.min(delayMs, 35_000));
   }
 
-  const data = await res.json();
-  const message = data.choices?.[0]?.message;
-  const content: string | undefined = message?.content;
-  if (!content) throw new Error("Groq returned an empty response.");
-
-  return { content, executedTools: message?.executed_tools ?? [] };
+  throw lastError ?? new Error("Groq API call failed after retries.");
 }
 
 /**
