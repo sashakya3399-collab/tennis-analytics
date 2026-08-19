@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { generateMatchAnalysis, extractTrailingJsonBlock } from "../gemini/client";
+import { generateMatchAnalysis, extractTrailingJsonBlock } from "../groq/client";
+import { searchWeb, formatSearchResults } from "../search/tavily";
 import type { WeatherSnapshot } from "../weather/openweather";
 import type { ScheduledMatch } from "./schedule";
 
@@ -131,16 +132,43 @@ export function summaryToColumns(summary: AnalysisSummary | null) {
  * last-10 surface+weather-matched comparison, real current ranking, and
  * motivation/stakes asymmetry) — then append one trailing ```json block
  * with the fields we persist as queryable columns.
+ *
+ * Does its own real Tavily web search BEFORE calling the model, rather than
+ * relying on groq/compound's built-in search tool — that currently 413s on
+ * essentially any search-triggering prompt (see search/tavily.ts
+ * docstring). The model is explicitly told not to attempt to search
+ * itself; only code execution (confirmed working) is used as a tool here.
  */
 export async function analyzeMatch(
   match: Pick<ScheduledMatch, "tournament" | "round" | "surface" | "location" | "player_a" | "player_b" | "scheduled_time">,
   weather: WeatherSnapshot | null,
 ): Promise<MatchAnalysisResult> {
-  const prompt = `Apply the full Matrix Engine specification above to this real, current match.
-Use Google Search grounding to find real, live, current data for both players (recent results,
-head-to-head, surface stats, injuries, ranking) — do not fabricate any statistic. Use code
-execution to actually run the Elo, Bayesian shrinkage, hold/break, and Markov-chain set/match
-probability math the spec describes — do not eyeball or mentally approximate the numbers.
+  const [formSearch, statsSearch] = await Promise.all([
+    searchWeb(
+      `${match.player_a} vs ${match.player_b} tennis head-to-head ranking recent results 2026`,
+      6,
+    ),
+    searchWeb(
+      `${match.player_a} ${match.player_b} ${match.surface ?? ""} court stats first serve percentage ${match.location ?? ""} elevation altitude`,
+      6,
+    ),
+  ]);
+  const searchContext = [
+    formatSearchResults("Ranking, recent form, head-to-head", formSearch),
+    formatSearchResults("Surface/serve stats, host city elevation", statsSearch),
+  ].join("\n\n---\n\n");
+
+  const prompt = `${searchContext}
+
+---
+
+Apply the full Matrix Engine specification above to this real, current match, using ONLY the
+real search results above as your source of live facts — do NOT attempt to search the web
+yourself under any circumstances (this call has no working search tool; attempting to invoke one
+will fail the whole request). Where the search results don't cover something, say so explicitly
+per the spec's own "не выдумывать данные" rule rather than inventing a number. Use code execution
+to actually run the Elo, Bayesian shrinkage, hold/break, and Markov-chain set/match probability
+math the spec describes — do not eyeball or mentally approximate the numbers.
 
 MATCH:
 Tournament: ${match.tournament}
@@ -156,7 +184,7 @@ ADDITIONAL REQUIRED FACTORS (on top of the base spec — these are mandatory for
 
 1. SURFACE + LAST 15 ON THIS SURFACE: the base spec's section 062 asks for a "Last-10-Surface"
    split — override that to LAST 15, not 10 (section 076 priority #4 in the addendum defers to
-   this per-call instruction). Search for and report each player's last 15 completed matches
+   this per-call instruction). Using the search results above, report each player's last 15 completed matches
    specifically on ${match.surface ?? "this surface"} (win/loss record, and briefly how they
    played — dominant/close/struggling), not last 15 overall. If a player has fewer than 15 career
    matches on this surface, use however many real matches exist and say so explicitly rather than
@@ -168,7 +196,8 @@ ADDITIONAL REQUIRED FACTORS (on top of the base spec — these are mandatory for
    the total goes OVER that line and probability it goes UNDER it (they should sum to ~1.0). State
    the line and both probabilities as their own labeled output, not buried only in prose.
 
-3. ALTITUDE / BALL PHYSICS: search for the host city's elevation above sea level. If the venue is
+3. ALTITUDE / BALL PHYSICS: using the search results above, find the host city's elevation above
+   sea level (if not present in the results, say so explicitly rather than guessing). If the venue is
    at meaningfully high altitude (roughly >500m — e.g. Madrid ~667m is a known real example on
    tour), explicitly factor in the physical effect: thinner air reduces drag on the ball, which
    increases ball speed through the air and bounce height/skid — this generally favors bigger
@@ -176,7 +205,7 @@ ADDITIONAL REQUIRED FACTORS (on top of the base spec — these are mandatory for
    up. State the elevation in meters and whether/how it adjusts your read, even if the effect is
    negligible at low altitude — say so explicitly rather than omitting the factor.
 
-4. FIRST SERVE % AND RETURN OF SERVE: search for each player's real, current first-serve-in
+4. FIRST SERVE % AND RETURN OF SERVE: using the search results above, find each player's real, current first-serve-in
    percentage, first-serve points won %, second-serve points won %, and return points won %
    (recent tour-level form, not just career average) for their SERVE and RETURN ratings in the
    dashboard below — do not assign those 1-10 ratings without grounding them in these real stats.
@@ -185,11 +214,12 @@ ADDITIONAL REQUIRED FACTORS (on top of the base spec — these are mandatory for
    conditions — hot and dry (faster, harder court, ball flies further), rain/high humidity (slower
    court, ball picks up less pace, and on clay a WET clay court gets noticeably more slippery,
    changing how reliably players can slide into shots), or windy (disrupts timing, favors flatter
-   hitters over players who rely on heavy topspin arcs). Search for how each player has performed
-   historically in these SAME conditions before (hot-weather matches, rain-affected/high-humidity
-   matches, matches where sliding into the shot on a wet/slick surface mattered) — name which
-   player has the better track record in this specific condition and why, rather than a generic
-   "weather could be a factor" statement.
+   hitters over players who rely on heavy topspin arcs). Using the search results above, find how
+   each player has performed historically in these SAME conditions before (hot-weather matches,
+   rain-affected/high-humidity matches, matches where sliding into the shot on a wet/slick surface
+   mattered) — name which player has the better track record in this specific condition and why,
+   rather than a generic "weather could be a factor" statement. If the results don't cover this,
+   say so explicitly.
 
 6. LAST 10 UNDER THIS EXACT SURFACE+WEATHER COMBINATION: separately from the broader LAST-15
    surface-only sample in item 1, isolate up to the LAST 10 matches for EACH player that most
@@ -202,8 +232,9 @@ ADDITIONAL REQUIRED FACTORS (on top of the base spec — these are mandatory for
    databases usually don't tag conditions), say so explicitly and fall back to the closest available
    proxy (e.g. surface-only last-10, or the item-1 last-15 sample), naming the fallback used.
 
-7. RANKING + MOTIVATION/STAKES ASYMMETRY: search for and explicitly state each player's real,
-   current ATP/WTA singles ranking (and ranking points if findable) — do not leave this implicit.
+7. RANKING + MOTIVATION/STAKES ASYMMETRY: using the search results above, explicitly state each
+   player's real, current ATP/WTA singles ranking (and ranking points if findable) — do not leave
+   this implicit; say so if the results don't cover it.
    Then reason about why THIS match matters to each player right now: ranking points being
    defended from last year at this same event, points needed to stay in/reach the top N for
    seeding or direct entry to majors, ATP/WTA Race-to-Finals implications, prize money significance
@@ -225,13 +256,22 @@ After both blocks, append exactly one fenced block:
 ${TRAILING_JSON_SHAPE}
 \`\`\``;
 
-  const { fullText, usedCodeExecution, usedSearchGrounding } = await generateMatchAnalysis(prompt);
+  const { fullText, usedCodeExecution, usedSearchGrounding: modelAttemptedOwnSearch } =
+    await generateMatchAnalysis(prompt);
+
+  // "Search grounding" now means our own pre-fetched Tavily results actually
+  // returned content (the model has no working search tool of its own —
+  // see the docstring above). modelAttemptedOwnSearch is kept as a
+  // diagnostic: if it's ever true, groq/compound tried to search despite
+  // being told not to, which is worth knowing even though it's not what
+  // "grounded" means here anymore.
+  const ourSearchHadResults = formSearch.results.length > 0 || statsSearch.results.length > 0;
 
   return {
     fullReport: fullText,
     summary: parseSummary(fullText),
     usedCodeExecution,
-    usedSearchGrounding,
+    usedSearchGrounding: ourSearchHadResults || modelAttemptedOwnSearch,
   };
 }
 
@@ -259,7 +299,9 @@ export async function analyzeLiveUpdate(
 ): Promise<MatchAnalysisResult> {
   const prompt = `LIVE UPDATE per addendum section 078 — a PRE-MATCH analysis for this exact pair
 already exists (full text below). Do NOT redo the full PRE-MATCH build-up (surface/serve/return/
-hold groundwork). Take the current live score as new evidence and recompute the LIVE win
+hold groundwork), and do NOT attempt to search the web (this call has no working search tool;
+attempting to invoke one will fail the whole request) — the prior analysis below already has all
+the facts you need. Take the current live score as new evidence and recompute the LIVE win
 probabilities, most likely final score, and total games from this point, using code execution for
 the actual math (score-state game/set probability, not eyeballing).
 

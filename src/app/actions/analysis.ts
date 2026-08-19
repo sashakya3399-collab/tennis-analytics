@@ -8,7 +8,7 @@ export type RerunState = { error?: string; started?: boolean } | null;
 /**
  * Manual "re-run today's analysis" button — requires a logged-in session.
  * Fires the Background Function and returns immediately; the run itself
- * takes minutes (schedule discovery + one Gemini call per match), which is
+ * takes minutes (schedule discovery + one Groq call per match), which is
  * why this doesn't await runDailyAnalysis directly — see trigger.ts.
  */
 export async function rerunAnalysis(): Promise<RerunState> {

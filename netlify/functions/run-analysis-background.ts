@@ -4,7 +4,7 @@ import { runManualPreMatch, runManualLiveUpdate } from "../../src/lib/analysis/m
 import type { BackgroundAnalysisPayload } from "../../src/lib/analysis/trigger";
 
 /**
- * The ONE place where the actual Gemini/Matrix-Engine work happens —
+ * The ONE place where the actual Groq/Matrix-Engine work happens —
  * scheduled daily runs, manual dashboard re-runs, ad-hoc PLAYER_1/PLAYER_2
  * lookups, and LIVE score updates all funnel through this single Netlify
  * Background Function (15-minute execution budget), triggered via
@@ -56,7 +56,7 @@ const handler = async (req: Request) => {
     // their own failure state onto the relevant row (analysis_runs /
     // manual_analyses.last_error) before rethrowing — this catch is just
     // the last-resort log, since there's no HTTP caller left waiting by
-    // the time a Gemini call fails.
+    // the time a Groq call fails.
     console.error("Background analysis run failed:", err);
   }
 };

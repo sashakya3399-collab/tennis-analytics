@@ -80,7 +80,7 @@ export async function runDailyAnalysis(
           player_b: match.player_b,
           ...summaryToColumns(analysis.summary),
           full_report: analysis.fullReport,
-          model_used: process.env.GEMINI_MODEL || "gemini-2.5-pro",
+          model_used: process.env.GROQ_MODEL || "groq/compound",
           used_code_execution: analysis.usedCodeExecution,
           used_search_grounding: analysis.usedSearchGrounding,
         });

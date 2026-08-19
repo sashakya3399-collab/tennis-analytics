@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { generateGrounded } from "../gemini/client";
+import { generateText } from "../groq/client";
+import { searchWeb, formatSearchResults } from "../search/tavily";
 
 const ScheduledMatchSchema = z.object({
   tournament: z.string(),
@@ -84,19 +85,32 @@ export function isTopTierSinglesMatch(match: ScheduledMatch): boolean {
 }
 
 /**
- * Asks Gemini (Google Search grounded) for today's real ATP/WTA schedule,
- * restricted to top-tier tour-level singles only — no doubles, no ITF World
- * Tennis Tour (M15/M25/W15/W25...), no Challengers, no seniors/legends/
- * wheelchair/exhibition circuits.
- * This is a factual retrieval task, not a reasoning task — no code
- * execution needed here, only search grounding.
+ * Finds today's real ATP/WTA schedule, restricted to top-tier tour-level
+ * singles only — no doubles, no ITF World Tennis Tour (M15/M25/W15/W25...),
+ * no Challengers, no seniors/legends/wheelchair/exhibition circuits.
+ *
+ * Two-step design (not a single LLM-with-built-in-search call): Groq's
+ * groq/compound has a built-in web search tool, but it currently 413s on
+ * essentially any search-triggering prompt (see search/tavily.ts
+ * docstring), so this does a real Tavily search itself, then hands the
+ * real results to a plain (non-agentic) Groq model purely to extract
+ * structured JSON — a pure text-reasoning task, no tools involved.
  */
 export async function fetchTodaysSchedule(dateISO: string): Promise<{
   matches: ScheduledMatch[];
   filteredOutCount: number;
 }> {
-  const prompt = `You have Google Search grounding enabled. Find the real, top-tier ATP Tour and
-WTA Tour SINGLES matches SCHEDULED for ${dateISO}.
+  const search = await searchWeb(
+    `ATP WTA tennis order of play schedule matches ${dateISO}`,
+    8,
+  );
+  const searchContext = formatSearchResults(`ATP/WTA schedule for ${dateISO}`, search);
+
+  const prompt = `${searchContext}
+
+Based ONLY on the real search results above (do not use prior knowledge, do not invent matches —
+if the results don't clearly show a match, leave it out), extract the top-tier ATP Tour and WTA
+Tour SINGLES matches SCHEDULED for ${dateISO}.
 
 ONLY include matches from top-tier tour-level events:
 - Grand Slams (Australian Open, Roland Garros/French Open, Wimbledon, US Open)
@@ -105,14 +119,12 @@ ONLY include matches from top-tier tour-level events:
 - ATP 250 / WTA 250
 - ATP Finals / WTA Finals
 
-STRICTLY EXCLUDE, even if scheduled the same day:
+STRICTLY EXCLUDE, even if mentioned in the results:
 - Doubles or mixed doubles (singles only)
 - ITF World Tennis Tour events (tournament codes like M15, M25, W15, W25, W35, M35, W75, M75, etc.)
 - ATP/WTA Challenger Tour
 - Wheelchair, seniors/legends, exhibition, or juniors events
 - Qualifying rounds of any of the above (main draw only)
-
-Use live search results — do not rely on memory, do not invent matches.
 
 Respond with ONLY a raw JSON array (no prose, no markdown fences, no commentary before or
 after) where each element has exactly these fields:
@@ -129,10 +141,13 @@ after) where each element has exactly these fields:
   }
 ]
 
-If there are genuinely no qualifying top-tier ATP/WTA singles matches scheduled for this date,
+If the search results genuinely show no qualifying top-tier ATP/WTA singles matches for this date,
 respond with an empty array: []`;
 
-  const text = await generateGrounded(prompt);
+  const text = await generateText(
+    "You extract structured tennis schedule data from real search results. Never invent matches not present in the provided results.",
+    prompt,
+  );
   const parsed = extractJsonArray(text);
   const all = ScheduleResponseSchema.parse(parsed);
 

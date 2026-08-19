@@ -15,7 +15,7 @@ async function requireUser() {
 
 /**
  * Both actions below only fire the Background Function and return — see
- * trigger.ts for why (Gemini calls with code execution routinely exceed
+ * trigger.ts for why (Groq calls with code execution routinely exceed
  * Netlify's 10s/26s Server Action timeout). The result appears on the
  * dashboard a bit later; there's no live "here's your analysis" response.
  */

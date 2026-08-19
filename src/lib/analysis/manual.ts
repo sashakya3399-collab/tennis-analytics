@@ -18,7 +18,7 @@ export type ManualMatchInput = {
  *
  * Runs fire-and-forget from a Netlify Background Function (see
  * netlify/functions/run-analysis-background.ts) — there's no caller left
- * to hand a thrown error to by the time Gemini responds, so failures are
+ * to hand a thrown error to by the time Groq responds, so failures are
  * caught here and written onto the row as `last_error` instead of thrown,
  * matching how runDailyAnalysis self-reports onto analysis_runs.
  */
@@ -63,7 +63,7 @@ export async function runManualPreMatch(input: ManualMatchInput): Promise<{ manu
       live_score: null,
       ...summaryToColumns(analysis.summary),
       full_report: analysis.fullReport,
-      model_used: process.env.GEMINI_MODEL || "gemini-2.5-pro",
+      model_used: process.env.GROQ_MODEL || "groq/compound",
       used_code_execution: analysis.usedCodeExecution,
       used_search_grounding: analysis.usedSearchGrounding,
     });
@@ -130,7 +130,7 @@ export async function runManualLiveUpdate(manualAnalysisId: string, liveScore: s
       live_score: liveScore,
       ...summaryToColumns(analysis.summary),
       full_report: analysis.fullReport,
-      model_used: process.env.GEMINI_MODEL || "gemini-2.5-pro",
+      model_used: process.env.GROQ_MODEL || "groq/compound",
       used_code_execution: analysis.usedCodeExecution,
       used_search_grounding: analysis.usedSearchGrounding,
     });

@@ -11,12 +11,12 @@ export type BackgroundAnalysisPayload =
   | { mode: "manual_live"; manualAnalysisId: string; liveScore: string };
 
 /**
- * Fires the Netlify Background Function that does the actual Gemini work
+ * Fires the Netlify Background Function that does the actual Groq/Tavily work
  * (netlify/functions/run-analysis-background.ts) and returns as soon as
  * Netlify's platform hands back its 202 ack — NOT once the analysis
  * itself finishes. This exists because Netlify caps synchronous
  * functions/Server Actions at 10s (free) / 26s (paid), while a single
- * Gemini call with code execution + search grounding routinely takes
+ * Groq call with code execution routinely takes
  * 20-60+ seconds, and the daily/manual pipelines make several such calls
  * in a row — see project memory for the investigation. Background
  * Functions get a 15-minute budget instead.
