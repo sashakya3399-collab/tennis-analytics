@@ -46,7 +46,14 @@ function parseRetryDelayMs(body: string): number | null {
   return Math.ceil((minutes * 60 + seconds) * 1000);
 }
 
-const MAX_RETRIES = 2;
+// Raised from 2 (2026-08-21): a real 429 showed compound's internal
+// routing model (meta-llama/llama-4-scout-17b-16e-instruct) has its OWN
+// tighter 30K-TPM sub-limit, separate from compound's own 70K-TPM headline
+// limit — a single heavy call needing ~18K tokens against an already
+// ~26K-used window can need more than 2 retries to land, especially with
+// other org-wide concurrent usage. 5 retries x up to 150s cap still fits
+// comfortably inside the Background Function's 15-minute budget.
+const MAX_RETRIES = 5;
 
 type GroqToolCall = { type: string; [key: string]: unknown };
 type GroqCallResult = { content: string; executedTools: GroqToolCall[] };
@@ -93,12 +100,16 @@ async function callGroq(
     const canRetry = attempt < MAX_RETRIES && (res.status === 429 || res.status === 413);
     if (!canRetry) throw lastError;
 
-    const delayMs = res.status === 429 ? (parseRetryDelayMs(body) ?? 20_000) : 5_000;
+    // +3s safety buffer on 429s: Groq's suggested delay is computed at the
+    // moment of the error, but other concurrent org-wide usage can eat the
+    // freed-up headroom before this retry actually lands (observed live,
+    // 2026-08-21) — a small buffer costs little against a 15-minute budget.
+    const delayMs = res.status === 429 ? (parseRetryDelayMs(body) ?? 20_000) + 3_000 : 5_000;
     // Cap raised from 35s to 150s (2026-08-19): a real TPD (tokens-per-day)
     // 429 suggested a ~110s wait, which the old 35s cap would have
     // truncated, guaranteeing the retry fires too early and fails again.
     // The Background Function has a 15-minute budget, so this is still a
-    // small fraction of it even with MAX_RETRIES=2.
+    // small fraction of it even with MAX_RETRIES raised to 5.
     await sleep(Math.min(delayMs, 150_000));
   }
 
