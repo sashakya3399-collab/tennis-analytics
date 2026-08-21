@@ -9,10 +9,10 @@ troubleshooting session — see `git log` for the exact commit-by-commit fix his
 1. **GitHub** — a repo (this one). Must be **public**, or Netlify's free plan needs upgrading —
    see "Netlify gotchas" below.
 2. **Netlify** — a team + a site connected to the GitHub repo via continuous deployment.
-3. **Supabase** — a project. Run `supabase/schema.sql` once in the SQL Editor (fresh project) or
-   `supabase/migration_2026-08-19_first_set_total_screenshot.sql` (existing project migrating from
-   the old daily-schedule/win-probability shape). Create at least one Auth user manually
-   (Authentication → Users → Add user) — there's no self-serve signup.
+3. **Supabase** — a project. Run `supabase/schema.sql` once in the SQL Editor (fresh project), or
+   in order on an existing project: `supabase/migration_2026-08-19_first_set_total_screenshot.sql`
+   then `supabase/migration_2026-08-21_processing_status_guard.sql`. Create at least one Auth user
+   manually (Authentication → Users → Add user) — there's no self-serve signup.
 4. **Groq** (console.groq.com) — free API key, no card.
 5. **Tavily** (tavily.com) — free API key, no card, 1000 credits/month.
 
@@ -73,12 +73,25 @@ a commit).
 ## Groq gotchas
 
 - **Free tier caps `groq/compound` at 30,000 tokens/minute (org-wide)** on its internal routing
-  model. This app's own system prompt alone is ~13,000 tokens — a single analysis call requests
-  ~13-18K tokens, leaving little headroom for back-to-back calls. `callGroq()` in
-  `src/lib/groq/client.ts` retries automatically on 429, honoring the server's suggested delay —
-  don't rapid-fire manual test calls while debugging a rate-limit issue, that keeps the window
-  from ever clearing (confirmed live 2026-08-19: `Used` kept climbing between repeated test
-  attempts rather than resetting).
+  model (`meta-llama/llama-4-scout-17b-16e-instruct`) — a SEPARATE, tighter budget than the
+  headline `x-ratelimit-limit-tokens: 70000` you'll see on the outer `compound` response headers.
+  This app's own system prompt alone is ~13,000 tokens — a single analysis call requests ~14-18K
+  tokens, i.e. **over half the 30K budget on one call**. `callGroq()` in `src/lib/groq/client.ts`
+  retries automatically on 429, honoring the server's suggested delay — don't rapid-fire manual
+  test calls while debugging a rate-limit issue, that keeps the window from ever clearing
+  (confirmed live 2026-08-19: `Used` kept climbing between repeated test attempts rather than
+  resetting).
+- **A single request already eating over half the budget means TWO overlapping requests can never
+  both succeed, and nothing in the UI originally prevented that.** Confirmed live 2026-08-21: three
+  real screenshot submissions across 6 minutes all failed with `Used` pinned at ~27-28K/30K the
+  whole time — root cause was the founder (reasonably) submitting a second screenshot while the
+  first was still deep in its own retry chain (each can legitimately run several minutes), not
+  sustained external load. Fixed via `manual_analyses.status` (`processing`/`done`/`error`,
+  migration `2026-08-21`) — a placeholder row is created SYNCHRONOUSLY before the Groq chain
+  starts, and `analyzeScreenshotAction` rejects a new submission while one is already
+  `processing`. See project memory `[[skill_background_job_overlap_guard_shared_rate_limit]]` for
+  the generalized pattern. **Don't just raise `MAX_RETRIES` to fix a 429 you can't otherwise
+  explain** — a longer retry chain widens this exact collision window rather than closing it.
 - **`groq/compound`'s built-in web search tool is broken** (`413 Request Entity Too Large` on
   most search-triggering prompts — a known, reported Groq platform issue). This app does its own
   search via Tavily instead and tells the model not to search itself; the client auto-retries the
@@ -116,13 +129,25 @@ first:
 
 ```bash
 source .env.local
+# Create the placeholder row first (2026-08-21+: the background function expects
+# an existing manual_analyses row id, it no longer inserts one itself) —
+# either via the dashboard UI, or directly:
+MANUAL_ID=$(curl -s -X POST "$NEXT_PUBLIC_SUPABASE_URL/rest/v1/manual_analyses" \
+  -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "content-type: application/json" -H "prefer: return=representation" \
+  -d '{"player_a":"Обработка...","player_b":"Обработка...","status":"processing"}' \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")
+
 IMG_B64=$(base64 -i /path/to/screenshot.png)
 curl -s -X POST "https://<site>.netlify.app/.netlify/functions/run-analysis-background" \
   -H "content-type: application/json" -H "authorization: Bearer $CRON_SECRET" \
-  -d "{\"mode\":\"screenshot_pre_match\",\"imageBase64\":\"$IMG_B64\",\"mimeType\":\"image/png\"}"
+  -d "{\"mode\":\"screenshot_pre_match\",\"manualAnalysisId\":\"$MANUAL_ID\",\"imageBase64\":\"$IMG_B64\",\"mimeType\":\"image/png\"}"
 # -> expect HTTP 202 immediately; the actual result lands in Supabase a bit later
 ```
 
 Then poll Supabase directly (`manual_analyses` / `manual_analysis_entries` via the REST API with
-the service-role key) rather than repeatedly reloading the dashboard, to watch for `last_error`
-without spending a browser session.
+the service-role key) rather than repeatedly reloading the dashboard, to watch `status` go from
+`processing` to `done`/`error` without spending a browser session. **Check `status` before firing a
+manual test this way** — if a real `processing` row already exists (from the founder's own UI
+session), a second concurrent call will collide with it exactly as described in the Groq gotchas
+section above; either wait for it to resolve or delete the stale row first.
