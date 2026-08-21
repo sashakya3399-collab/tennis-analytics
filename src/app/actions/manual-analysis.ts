@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { triggerBackgroundAnalysis } from "@/lib/analysis/trigger";
+import { createProcessingPlaceholder, hasProcessingAnalysis } from "@/lib/analysis/manual";
 
 export type ManualActionState = { error?: string; started?: boolean } | null;
 
@@ -46,12 +47,28 @@ export async function analyzeScreenshotAction(
     return { error: `Файл слишком большой (макс. ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB).` };
   }
 
+  // Two overlapping background runs both compete for the same tight
+  // per-minute Groq quota on groq/compound's internal routing model —
+  // confirmed live (2026-08-21) as the real cause behind a run failing even
+  // with a generous retry budget. Block a second submission while one is
+  // still in flight rather than let them collide.
+  if (await hasProcessingAnalysis()) {
+    return {
+      error:
+        "Анализ уже выполняется — дождитесь его завершения (обычно 30-90 секунд, иногда дольше " +
+        "из-за лимита Groq) перед новой загрузкой.",
+    };
+  }
+
   try {
     const bytes = await file.arrayBuffer();
     const imageBase64 = Buffer.from(bytes).toString("base64");
 
+    const { manualAnalysisId } = await createProcessingPlaceholder();
+
     await triggerBackgroundAnalysis({
       mode: "screenshot_pre_match",
+      manualAnalysisId,
       imageBase64,
       mimeType: file.type,
     });

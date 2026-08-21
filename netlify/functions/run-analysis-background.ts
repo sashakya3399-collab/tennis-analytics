@@ -35,7 +35,10 @@ const handler = async (req: Request) => {
 
   try {
     if (payload.mode === "screenshot_pre_match") {
-      await runScreenshotAnalysis({ mimeType: payload.mimeType, dataBase64: payload.imageBase64 });
+      await runScreenshotAnalysis(payload.manualAnalysisId, {
+        mimeType: payload.mimeType,
+        dataBase64: payload.imageBase64,
+      });
     } else if (payload.mode === "manual_live") {
       await runManualLiveUpdate(payload.manualAnalysisId, payload.liveScore);
     } else {

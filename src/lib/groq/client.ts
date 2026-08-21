@@ -50,10 +50,16 @@ function parseRetryDelayMs(body: string): number | null {
 // routing model (meta-llama/llama-4-scout-17b-16e-instruct) has its OWN
 // tighter 30K-TPM sub-limit, separate from compound's own 70K-TPM headline
 // limit — a single heavy call needing ~18K tokens against an already
-// ~26K-used window can need more than 2 retries to land, especially with
-// other org-wide concurrent usage. 5 retries x up to 150s cap still fits
-// comfortably inside the Background Function's 15-minute budget.
-const MAX_RETRIES = 5;
+// ~26K-used window can need more than 2 retries to land. Briefly raised to
+// 5, then found the REAL driver of repeated failure was two overlapping
+// runs (nothing blocked a second screenshot submission while the first
+// was still retrying) both hammering this same 30K/min budget — fixed at
+// the source via a 'processing'-status guard (manual.ts /
+// manual-analysis.ts), which also means a longer retry chain no longer
+// extends a collision window the way it did before that guard existed.
+// Settled on 4: comfortable margin for a single in-flight run's own
+// natural TPM recovery, without an excessively long-lived retry chain.
+const MAX_RETRIES = 4;
 
 type GroqToolCall = { type: string; [key: string]: unknown };
 type GroqCallResult = { content: string; executedTools: GroqToolCall[] };

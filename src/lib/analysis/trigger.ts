@@ -1,5 +1,5 @@
 export type BackgroundAnalysisPayload =
-  | { mode: "screenshot_pre_match"; imageBase64: string; mimeType: string }
+  | { mode: "screenshot_pre_match"; manualAnalysisId: string; imageBase64: string; mimeType: string }
   | { mode: "manual_live"; manualAnalysisId: string; liveScore: string };
 
 /**

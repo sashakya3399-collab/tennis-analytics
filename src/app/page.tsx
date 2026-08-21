@@ -17,6 +17,7 @@ type ManualAnalysisRow = {
   player_a: string;
   player_b: string;
   last_error: string | null;
+  status: "processing" | "done" | "error";
   manual_analysis_entries: ManualEntry[];
 };
 
@@ -121,7 +122,11 @@ export default async function DashboardPage() {
                 </>
               ) : (
                 <p className="mt-3 text-sm text-neutral-500">
-                  {pair.last_error ? "Повторите загрузку скриншота." : "Анализ ещё не готов — обновите страницу."}
+                  {pair.status === "processing"
+                    ? "Обрабатывается — обновите страницу через 30-90 секунд."
+                    : pair.last_error
+                      ? "Повторите загрузку скриншота."
+                      : "Анализ ещё не готов — обновите страницу."}
                 </p>
               )}
 

@@ -25,6 +25,13 @@ create table if not exists manual_analyses (
   -- runs fire-and-forget in a Netlify Background Function, so this is the
   -- only way a failure becomes visible on the dashboard.
   last_error text,
+  -- 'processing' from the moment a screenshot is submitted (before the
+  -- Groq chain even starts) through to 'done'/'error'. Lets the dashboard
+  -- show something immediately instead of nothing for 30-90s, and lets a
+  -- second submission be blocked while one pair's run is still in flight —
+  -- two overlapping runs both hammer the same tight per-minute Groq quota
+  -- (see migration_2026-08-21_processing_status_guard.sql).
+  status text not null default 'done' check (status in ('processing', 'done', 'error')),
   created_at timestamptz not null default now()
 );
 
